@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.DS_Store
+.cert/
+# Local runtime data (user accounts, credentials). Never commit.
+server/data/

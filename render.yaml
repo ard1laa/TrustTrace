@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: trusttrace
+    env: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: MONGODB_URI
+        sync: false
+      - key: REGISTRAR_PRIVATE_SEED
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: APPLE_SERVICE_ID
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false

@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-[#F4F2EE] text-[#191919] dark:bg-[#0D1117] dark:text-[#E6EDF3] transition-colors duration-150;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: hidden;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-[#0A66C2]/60 ring-offset-1 ring-offset-transparent;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .linkedin-card {
+    @apply bg-white dark:bg-[#1B1F23] border border-[#E0DFDC]/80 dark:border-[#30363D] rounded-2xl shadow-[0_1px_2px_rgba(0,0,0,0.04),0_4px_16px_-8px_rgba(0,0,0,0.08)] dark:shadow-[0_1px_2px_rgba(0,0,0,0.4)] transition-shadow duration-200;
+  }
+
+  .linkedin-card-hover {
+    @apply hover:shadow-[0_2px_4px_rgba(0,0,0,0.05),0_12px_28px_-12px_rgba(0,0,0,0.18)] hover:-translate-y-px transition-all duration-200;
+  }
+
+  .modal-backdrop {
+    @apply fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm p-0 sm:p-4 overflow-y-auto animate-fade-in;
+  }
+
+  .modal-panel {
+    @apply linkedin-card w-full rounded-b-none sm:rounded-2xl max-h-[94vh] overflow-y-auto flex flex-col animate-slide-up sm:animate-scale-in;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold;
+  }
+
+  .section-label {
+    @apply text-[11px] font-bold uppercase tracking-wider text-[#666666] dark:text-[#8B949E];
+  }
+
+  .skeleton {
+    @apply animate-pulse rounded-lg bg-black/5 dark:bg-white/5;
+  }
+
+  .linkedin-btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full font-semibold text-sm bg-[#0A66C2] hover:bg-[#004182] text-white transition-all shadow-sm active:scale-[0.99] disabled:opacity-50;
+  }
+
+  .linkedin-btn-outline {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-1.5 rounded-full font-semibold text-sm border border-[#0A66C2] text-[#0A66C2] dark:text-[#58A6FF] dark:border-[#58A6FF] hover:bg-[#EBF3FB] dark:hover:bg-[#0A66C2]/15 transition-all active:scale-[0.99];
+  }
+
+  .linkedin-btn-neutral {
+    @apply inline-flex items-center justify-center gap-2 px-3.5 py-1.5 rounded-full font-medium text-sm border border-[#666666]/40 dark:border-[#8B949E]/40 text-[#404040] dark:text-[#C9D1D9] hover:bg-black/5 dark:hover:bg-white/5 transition-all;
+  }
+
+  .linkedin-input {
+    @apply w-full px-3.5 py-2.5 sm:py-2 rounded-lg text-sm bg-white dark:bg-[#0D1117] border border-[#C0BFBC] dark:border-[#30363D] text-[#191919] dark:text-[#E6EDF3] focus:outline-none focus:ring-2 focus:ring-[#0A66C2] focus:border-transparent transition-all;
+  }
+}
+
+/* Custom subtle scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 120, 120, 0.3);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 120, 120, 0.5);
+}

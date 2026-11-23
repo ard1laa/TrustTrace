@@ -1,0 +1,43 @@
+{
+  "name": "trusttrace-web3-credentials",
+  "version": "1.0.0",
+  "description": "TrustTrace: blockchain-anchored micro-credentials with skill visualizations.",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "dev:client": "vite",
+    "dev:server": "node server/index.js",
+    "build": "vite build",
+    "start": "NODE_ENV=production node server/index.js",
+    "preview": "vite preview",
+    "db:reset": "node -e \"import('./server/db/adapter.js').then(async ({db})=>{await db.init();await db.resetToInitialState();console.log('Database reset to a clean state.');process.exit(0)})\"",
+    "test:flutter": "cd flutter_app && flutter test"
+  },
+  "dependencies": {
+    "chart.js": "^4.4.6",
+    "cors": "^2.8.5",
+    "d3": "^7.9.0",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.4",
+    "express": "^4.21.1",
+    "jsqr": "^1.4.0",
+    "lucide-react": "^0.460.0",
+    "mongoose": "^8.8.1",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-chartjs-2": "^5.2.0",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "vite": "^5.4.11"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
