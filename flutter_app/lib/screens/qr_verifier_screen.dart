@@ -250,7 +250,7 @@ class _QrVerifierScreenState extends State<QrVerifierScreen> {
     final results = widget.students.where((stu) {
       if (stu['visibleInTalentSearch'] == false) return false;
       final field = SkillTaxonomy.forUser(stu);
-      if (_fieldFilter != 'ALL' && field.id != _fieldFilter) return false;
+      if (_fieldFilter != 'ALL' && field.familyId != _fieldFilter) return false;
       if (q.isNotEmpty && !'${stu['name']} ${stu['university']} ${field.label} ${stu['studentId']}'.toLowerCase().contains(q)) return false;
       final creds = widget.credentials.where((c) => c['studentUserId'] == stu['id'] && c['state'] == 'Locked' && c['isPublic'] != false).toList();
       if (_minScore > 0) {
@@ -277,7 +277,7 @@ class _QrVerifierScreenState extends State<QrVerifierScreen> {
           decoration: const InputDecoration(labelText: 'Field of study', border: OutlineInputBorder(), isDense: true),
           items: [
             const DropdownMenuItem(value: 'ALL', child: Text('All fields')),
-            ...SkillTaxonomy.fields.map((f) => DropdownMenuItem(value: f.id, child: Text(f.label))),
+            ...SkillTaxonomy.families.map((f) => DropdownMenuItem(value: f.id, child: Text(f.label, overflow: TextOverflow.ellipsis))),
           ],
           onChanged: (v) => setState(() => _fieldFilter = v ?? 'ALL'),
         ),

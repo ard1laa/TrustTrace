@@ -1,6 +1,9 @@
-// Dart copy of shared/skillTaxonomy.js. Keep both in sync: the server, web and
-// mobile apps must place each credential on the same radar axis.
+// Field-of-study taxonomy. The data lives in skill_taxonomy_data.dart, generated
+// from shared/skillTaxonomy.js (`npm run gen:taxonomy`); this file mirrors the
+// JS resolution logic so web, server and mobile place credentials identically.
 import 'package:flutter/material.dart';
+
+part 'skill_taxonomy_data.dart';
 
 class SkillAxis {
   final String name;
@@ -8,14 +11,37 @@ class SkillAxis {
   const SkillAxis(this.name, this.keywords);
 }
 
-class FieldOfStudy {
+/// Defines the six radar axes shared by a group of programmes.
+class FieldFamily {
   final String id;
   final String label;
   final List<SkillAxis> axes;
   final List<int> benchmark;
   final Map<String, String> legacyMap;
-  const FieldOfStudy(this.id, this.label, this.axes, this.benchmark, this.legacyMap);
+  const FieldFamily(this.id, this.label, this.axes, this.benchmark, this.legacyMap);
+}
 
+/// A programme a student can pick ("Accounting", "Mechanical Engineering").
+class Program {
+  final String id;
+  final String label;
+  final String family;
+  final List<String> aliases;
+  const Program(this.id, this.label, this.family, this.aliases);
+}
+
+/// A resolved field: the programme's name with its family's axes.
+class FieldOfStudy {
+  final String id;
+  final String label;
+  final FieldFamily family;
+  const FieldOfStudy(this.id, this.label, this.family);
+
+  String get familyId => family.id;
+  String get familyLabel => family.label;
+  List<SkillAxis> get axes => family.axes;
+  List<int> get benchmark => family.benchmark;
+  Map<String, String> get legacyMap => family.legacyMap;
   List<String> get axisNames => axes.map((a) => a.name).toList();
 }
 
@@ -28,8 +54,16 @@ class AxisScore {
   const AxisScore(this.axis, this.score, this.count, this.benchmark, this.color);
 }
 
+class ProgramGroup {
+  final FieldFamily family;
+  final List<Program> programs;
+  const ProgramGroup(this.family, this.programs);
+}
+
 class SkillTaxonomy {
-  static const defaultFieldId = 'others';
+  static const defaultFieldId = kDefaultFieldId;
+  static const List<FieldFamily> families = kFieldFamilies;
+  static const List<Program> programs = kPrograms;
 
   static const List<Color> axisColors = [
     Color(0xFF0A66C2),
@@ -40,104 +74,41 @@ class SkillTaxonomy {
     Color(0xFF15803D),
   ];
 
-  static const List<FieldOfStudy> fields = [
-    FieldOfStudy('computer-science', 'Computer Science', [
-      SkillAxis('Computational Thinking', ['computational', 'problem solving', 'hackathon', 'olympiad', 'puzzle', 'challenge', 'ctf']),
-      SkillAxis('Programming', ['programming', 'coding', 'code', 'python', 'java', 'javascript', 'react', 'flutter', 'developer', 'software', 'web', 'app', 'mobile']),
-      SkillAxis('Logic & Algorithms', ['algorithm', 'logic', 'data structure', 'competitive', 'icpc', 'math', 'discrete', 'optimization']),
-      SkillAxis('System Architecture', ['architecture', 'system', 'cloud', 'aws', 'azure', 'devops', 'database', 'network', 'distributed', 'blockchain', 'infrastructure']),
-      SkillAxis('Data & AI', ['data', 'machine learning', 'ai', 'artificial intelligence', 'neural', 'analytics', 'deep learning', 'nlp', 'vision']),
-      SkillAxis('Collaboration', ['team', 'club', 'society', 'volunteer', 'lead', 'president', 'committee', 'community', 'mentor']),
-    ], [76, 78, 74, 70, 72, 75], {
-      'Computational Thinking': 'Computational Thinking',
-      'Technical Engineering': 'System Architecture',
-      'Leadership': 'Collaboration',
-      'Teamwork': 'Collaboration',
-      'Adaptability': 'Computational Thinking',
-      'Conflict Resolution': 'Collaboration',
-    }),
-    FieldOfStudy('engineering', 'Engineering', [
-      SkillAxis('Design & Prototyping', ['design', 'prototype', 'cad', 'solidworks', 'fabrication', '3d print', 'maker']),
-      SkillAxis('Technical Analysis', ['analysis', 'simulation', 'matlab', 'calculation', 'modelling', 'modeling', 'testing']),
-      SkillAxis('Systems Integration', ['robotics', 'iot', 'embedded', 'arduino', 'esp32', 'circuit', 'electronics', 'control', 'mechatronics']),
-      SkillAxis('Project Management', ['project', 'management', 'planning', 'schedule', 'lead', 'coordinator', 'manager']),
-      SkillAxis('Safety & Standards', ['safety', 'standard', 'iso', 'quality', 'compliance', 'osha', 'risk', 'ethics']),
-      SkillAxis('Teamwork', ['team', 'club', 'society', 'volunteer', 'competition', 'community', 'committee']),
-    ], [75, 74, 72, 70, 73, 77], {
-      'Computational Thinking': 'Technical Analysis',
-      'Technical Engineering': 'Systems Integration',
-      'Leadership': 'Project Management',
-      'Teamwork': 'Teamwork',
-      'Adaptability': 'Design & Prototyping',
-      'Conflict Resolution': 'Teamwork',
-    }),
-    FieldOfStudy('biology', 'Biology', [
-      SkillAxis('Lab Research', ['lab', 'laboratory', 'research', 'pcr', 'microscopy', 'culture', 'assay', 'bench', 'wet lab']),
-      SkillAxis('Data Analysis', ['data', 'analysis', 'statistics', 'bioinformatics', 'r programming', 'spss', 'genomics', 'sequencing']),
-      SkillAxis('Scientific Method', ['scientific', 'experiment', 'hypothesis', 'methodology', 'thesis', 'symposium', 'publication', 'poster']),
-      SkillAxis('Bioethics', ['ethics', 'bioethics', 'integrity', 'compliance', 'consent', 'policy', 'welfare']),
-      SkillAxis('Field Work', ['field', 'ecology', 'conservation', 'expedition', 'marine', 'wildlife', 'sampling', 'environment']),
-      SkillAxis('Science Communication', ['communication', 'presentation', 'outreach', 'writing', 'teaching', 'tutor', 'public', 'volunteer']),
-    ], [76, 73, 75, 70, 68, 72], {
-      'Computational Thinking': 'Data Analysis',
-      'Technical Engineering': 'Lab Research',
-      'Leadership': 'Science Communication',
-      'Teamwork': 'Science Communication',
-      'Adaptability': 'Field Work',
-      'Conflict Resolution': 'Bioethics',
-    }),
-    FieldOfStudy('business', 'Business', [
-      SkillAxis('Strategy', ['strategy', 'case competition', 'consulting', 'business plan', 'operations']),
-      SkillAxis('Finance & Analytics', ['finance', 'accounting', 'investment', 'analytics', 'excel', 'valuation', 'trading', 'economics']),
-      SkillAxis('Marketing', ['marketing', 'brand', 'social media', 'campaign', 'sales', 'digital', 'advertising']),
-      SkillAxis('Entrepreneurship', ['startup', 'entrepreneur', 'pitch', 'venture', 'innovation', 'incubator', 'founder']),
-      SkillAxis('Negotiation', ['negotiation', 'debate', 'mun', 'mediation', 'diplomacy', 'moot']),
-      SkillAxis('Leadership', ['lead', 'president', 'director', 'chair', 'head', 'captain', 'manager', 'exco', 'committee']),
-    ], [74, 72, 73, 70, 69, 77], {
-      'Computational Thinking': 'Finance & Analytics',
-      'Technical Engineering': 'Strategy',
-      'Leadership': 'Leadership',
-      'Teamwork': 'Leadership',
-      'Adaptability': 'Entrepreneurship',
-      'Conflict Resolution': 'Negotiation',
-    }),
-    FieldOfStudy('others', 'Others', [
-      SkillAxis('Leadership', ['lead', 'president', 'director', 'chair', 'head', 'captain', 'founder', 'exco', 'secretary', 'treasurer']),
-      SkillAxis('Communication', ['communication', 'presentation', 'writing', 'public speaking', 'media', 'journalism', 'debate']),
-      SkillAxis('Problem Solving', ['problem', 'hackathon', 'challenge', 'competition', 'analysis', 'innovation', 'case']),
-      SkillAxis('Adaptability', ['exchange', 'mobility', 'global', 'international', 'agile', 'bootcamp', 'adapt']),
-      SkillAxis('Teamwork', ['team', 'club', 'society', 'volunteer', 'community', 'committee', 'outreach', 'charity']),
-      SkillAxis('Critical Thinking', ['research', 'ethics', 'policy', 'critical', 'evaluation', 'reasoning', 'thesis']),
-    ], [76, 75, 74, 72, 78, 71], {
-      'Computational Thinking': 'Problem Solving',
-      'Technical Engineering': 'Problem Solving',
-      'Leadership': 'Leadership',
-      'Teamwork': 'Teamwork',
-      'Adaptability': 'Adaptability',
-      'Conflict Resolution': 'Communication',
-    }),
-  ];
+  static FieldFamily _family(String id) => families.firstWhere((f) => f.id == id, orElse: () => families.last);
+  static FieldOfStudy _view(Program p) => FieldOfStudy(p.id, p.label, _family(p.family));
+  static Program get _default => programs.firstWhere((p) => p.id == defaultFieldId);
 
-  static const _programHints = <String, List<String>>{
-    'computer-science': ['computer', 'computing', 'software', 'information tech', r'it\b', 'data science', 'cyber', 'informatics'],
-    'engineering': ['engineering', 'mechanical', 'electrical', 'civil', 'chemical eng', 'mechatronic'],
-    'biology': ['biology', 'biotech', 'biomedical', 'life science', 'microbio', 'genetics', 'biochem'],
-    'business': ['business', 'management', 'finance', 'accounting', 'marketing', 'economics', 'commerce', 'mba'],
-  };
+  static List<ProgramGroup> get groups =>
+      [for (final f in families) ProgramGroup(f, programs.where((p) => p.family == f.id).toList())];
 
-  static FieldOfStudy byId(String id) => fields.firstWhere((f) => f.id == id, orElse: () => fields.last);
+  static bool isKnownId(String? id) => id != null && (programs.any((p) => p.id == id) || families.any((f) => f.id == id));
 
-  /// Accepts a field id, a label, or a free-text program name.
+  static FieldOfStudy byId(String id) => resolve(id);
+
+  /// Accepts a programme id, a family id, a label, or free text ("BSc Accounting").
   static FieldOfStudy resolve(dynamic fieldOrProgram) {
     final q = (fieldOrProgram ?? '').toString().trim().toLowerCase();
-    if (q.isEmpty) return byId(defaultFieldId);
-    for (final f in fields) {
-      if (f.id == q || f.label.toLowerCase() == q) return f;
+    if (q.isEmpty) return _view(_default);
+    for (final p in programs) {
+      if (p.id == q || p.label.toLowerCase() == q) return _view(p);
     }
-    for (final entry in _programHints.entries) {
-      if (entry.value.any((w) => RegExp('\\b$w').hasMatch(q))) return byId(entry.key);
+    for (final f in families) {
+      if (f.id == q || f.label.toLowerCase() == q) return FieldOfStudy(f.id, f.label, f);
     }
-    return byId(defaultFieldId);
+    Program? best;
+    var bestLen = 0;
+    for (final p in programs) {
+      if (p.id == defaultFieldId) continue;
+      for (final phrase in [p.label.replaceAll(RegExp(r'\s*\(.*\)$'), ''), ...p.aliases]) {
+        final needle = phrase.toLowerCase().trim();
+        if (needle.length < 2 || needle.length <= bestLen) continue;
+        if (RegExp('(^|[^a-z])${RegExp.escape(needle)}([^a-z]|\$)').hasMatch(q)) {
+          best = p;
+          bestLen = needle.length;
+        }
+      }
+    }
+    return _view(best ?? _default);
   }
 
   static FieldOfStudy forUser(Map<String, dynamic>? user) {

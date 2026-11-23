@@ -35,12 +35,10 @@ export function verifyPassword(password, stored) {
 // ---------------------------------------------------------------------------
 // HS256 JWT
 // ---------------------------------------------------------------------------
-export function signJwt(payload) {
+export function signJwt(payload, ttlSeconds = Math.floor(TOKEN_TTL_MS / 1000)) {
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
   const now = Math.floor(Date.now() / 1000);
-  const body = Buffer.from(
-    JSON.stringify({ ...payload, iat: now, exp: now + Math.floor(TOKEN_TTL_MS / 1000) })
-  ).toString('base64url');
+  const body = Buffer.from(JSON.stringify({ ...payload, iat: now, exp: now + ttlSeconds })).toString('base64url');
   const sig = crypto.createHmac('sha256', JWT_SECRET).update(`${header}.${body}`).digest('base64url');
   return `${header}.${body}.${sig}`;
 }
@@ -88,18 +86,30 @@ export function createAuthMiddleware(getUser) {
     next();
   };
 
+  // Recruiter and staff accounts awaiting approval can sign in, but can't use
+  // any role-gated feature until a registrar verifies them.
+  const isActive = (user) => (user.accountStatus || 'verified') === 'verified';
+  const pendingResponse = (res, user) =>
+    res.status(403).json({
+      error: user.accountStatus === 'rejected' ? 'Your account request was not approved.' : 'Your account is waiting for verification.',
+      code: 'ACCOUNT_PENDING'
+    });
+
   const requireRole = (...roles) => (req, res, next) =>
     requireAuth(req, res, () => {
       if (!roles.includes(req.user.role)) {
         return res.status(403).json({ error: 'You do not have permission to do that.' });
       }
+      if (!isActive(req.user)) return pendingResponse(res, req.user);
       next();
     });
 
-  // Allows the account owner, or any of the listed roles.
+  // Allows the account owner, or any of the listed (verified) roles.
   const requireSelfOr = (paramName, ...roles) => (req, res, next) =>
     requireAuth(req, res, () => {
-      if (req.user.id !== req.params[paramName] && !roles.includes(req.user.role)) {
+      const isSelf = req.user.id === req.params[paramName];
+      if (!isSelf && roles.includes(req.user.role) && !isActive(req.user)) return pendingResponse(res, req.user);
+      if (!isSelf && !roles.includes(req.user.role)) {
         return res.status(403).json({ error: 'You can only change your own account.' });
       }
       next();

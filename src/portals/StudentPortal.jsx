@@ -17,6 +17,7 @@ import CompetencyRadarChart from '../components/CompetencyRadarChart.jsx';
 import D3CompetencyGraph from '../components/D3CompetencyGraph.jsx';
 import Avatar from '../components/Avatar.jsx';
 import { resolveField, axisForCredential, axisColor } from '../../shared/skillTaxonomy.js';
+import { CredentialTags } from '../components/CredentialTags.jsx';
 
 export default function StudentPortal({
   student,
@@ -253,6 +254,7 @@ export default function StudentPortal({
                               day: 'numeric'
                             })}
                           </div>
+                          <CredentialTags credential={cred} className="mt-1.5" />
 
                           <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                             <span

@@ -13,6 +13,22 @@ import {
   generateStudentWalletIdentity
 } from './crypto/ecdsaEngine.js';
 import { analyzeCertificateUpload } from './services/aiScanner.js';
+import { warmUpLayoutOcr } from './services/ocrLayout.js';
+import { CATEGORIES } from './services/certificateParser.js';
+import {
+  ACCOUNT_STATUS,
+  requiresVerification,
+  checkStaffRegistration,
+  buildProofRecord,
+  validateProof,
+  verificationSummary,
+  isActive,
+  isDeveloperEmail,
+  developerKeyConfigured,
+  checkDeveloperKey,
+  issueDeveloperToken,
+  hasDeveloperAccess
+} from './services/access.js';
 import { runLiveSystemBenchmark } from './services/benchmarkEngine.js';
 import {
   hashPassword,
@@ -24,18 +40,17 @@ import {
   verifyAppleIdToken
 } from './services/auth.js';
 import { sseHandler, currentRevision } from './services/events.js';
-import { FIELDS, resolveField, publicTaxonomy } from '../shared/skillTaxonomy.js';
+import { resolveField, isKnownFieldId, publicTaxonomy } from '../shared/skillTaxonomy.js';
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-const ADMIN_CODE = process.env.ADMIN_VERIFICATION_CODE || 'ADMIN-VERIFY-2026';
+// Demo accounts work without a developer key only on development servers.
 const DEMO_LOGIN_ENABLED =
   process.env.ENABLE_DEMO_LOGIN === 'true' || (process.env.NODE_ENV !== 'production' && process.env.ENABLE_DEMO_LOGIN !== 'false');
 const MAX_AVATAR_BYTES = 600 * 1024;
-const FIELD_IDS = new Set(FIELDS.map((f) => f.id));
 
 const { optionalAuth, requireAuth, requireRole, requireSelfOr } = createAuthMiddleware((id) => db.findUserById(id));
 
@@ -51,13 +66,22 @@ app.use('/api', async (_req, _res, next) => {
 // ---------------------------------------------------------------------------
 // Serialization
 // ---------------------------------------------------------------------------
-const SECRET_FIELDS = ['passwordHash', 'privateKeyHex', 'seedPhrase', 'verificationCode', 'authProviders', 'pendingClaim'];
+const SECRET_FIELDS = [
+  'passwordHash', 'privateKeyHex', 'seedPhrase', 'verificationCode', 'authProviders', 'pendingClaim',
+  'verificationProof', 'verificationNote', 'verificationReviewedBy'
+];
 
 function publicUser(u) {
   if (!u) return null;
   const safe = { ...u };
   for (const key of SECRET_FIELDS) delete safe[key];
-  return { ...safe, name: u.name || 'User', fullName: u.name || 'User', fieldOfStudy: u.fieldOfStudy || resolveField(u.program).id };
+  return {
+    ...safe,
+    name: u.name || 'User',
+    fullName: u.name || 'User',
+    fieldOfStudy: u.fieldOfStudy || resolveField(u.program).id,
+    accountStatus: u.accountStatus || ACCOUNT_STATUS.verified
+  };
 }
 
 // The signed-in user's own record, including their wallet secrets.
@@ -68,13 +92,19 @@ function selfUser(u) {
     privateKeyHex: u.privateKeyHex,
     seedPhrase: u.seedPhrase,
     hasPassword: Boolean(u.passwordHash),
-    linkedProviders: (u.authProviders || []).map((p) => p.provider)
+    linkedProviders: (u.authProviders || []).map((p) => p.provider),
+    verification: verificationSummary(u),
+    isDeveloper: isDeveloperEmail(u.email)
   };
 }
 
 function authResponse(user, message) {
-  return { token: signJwt({ id: user.id, role: user.role }), user: selfUser(user), message };
+  const response = { token: signJwt({ id: user.id, role: user.role }), user: selfUser(user), message };
+  if (isDeveloperEmail(user.email)) response.developerToken = issueDeveloperToken(user.email);
+  return response;
 }
+
+const demoAllowed = (req) => DEMO_LOGIN_ENABLED || hasDeveloperAccess(req);
 
 function logTx(entry) {
   const blockNumber = entry.blockNumber ?? db.state.meta.nextBlockNumber++;
@@ -93,7 +123,7 @@ function logTx(entry) {
 }
 
 function normalizeField(value, program) {
-  return FIELD_IDS.has(value) ? value : resolveField(value || program).id;
+  return isKnownFieldId(value) ? value : resolveField(value || program).id;
 }
 
 function uniqueDidFor(email, assignedId) {
@@ -143,12 +173,15 @@ app.get('/api/events', sseHandler);
 // Authentication
 // ---------------------------------------------------------------------------
 app.get('/api/auth/providers', (_req, res) => {
-  res.json({ ...publicProviderConfig(), demoLogin: DEMO_LOGIN_ENABLED });
+  // demoLogin tells the hidden developer panel whether it needs a key; the
+  // panel itself is never shown until the developer gesture is used.
+  res.json({ ...publicProviderConfig(), demoLogin: DEMO_LOGIN_ENABLED, developerKeyRequired: !DEMO_LOGIN_ENABLED && developerKeyConfigured() });
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', optionalAuth, (req, res) => {
   const user = db.findUserByEmail(req.body.email);
   if (!user) return res.status(401).json({ error: 'No account found with that email.' });
+  if (user.isDemo && !demoAllowed(req)) return res.status(403).json({ error: 'Demo accounts are disabled on this server.' });
   if (!user.passwordHash) {
     return res.status(401).json({ error: 'This account uses Google or Apple sign-in. Use that button, or set a password from your profile.' });
   }
@@ -161,12 +194,45 @@ app.post('/api/auth/login', (req, res) => {
   res.json(authResponse(user, `Welcome back, ${user.name}.`));
 });
 
-app.post('/api/auth/demo-login', (req, res) => {
-  if (!DEMO_LOGIN_ENABLED) return res.status(403).json({ error: 'Demo login is disabled on this server.' });
-  const role = req.body.role === 'admin' ? 'admin' : 'recruiter';
-  const user = db.findUserById(role === 'admin' ? 'demo-admin-registrar' : 'demo-recruiter-global') || db.state.users.find((u) => u.role === role);
-  if (!user) return res.status(404).json({ error: `No demo ${role} account exists.` });
-  res.json(authResponse(user, `Signed in as the demo ${role === 'admin' ? 'university admin' : 'recruiter'}.`));
+// ---------------------------------------------------------------------------
+// Developer mode: unlocked by the hidden gesture plus a key, or by signing in
+// with a developer email. Grants one-tap access to the demo accounts.
+// ---------------------------------------------------------------------------
+const unlockAttempts = new Map();
+
+app.post('/api/auth/developer/unlock', optionalAuth, (req, res) => {
+  const ip = req.ip || 'unknown';
+  const now = Date.now();
+  const recent = (unlockAttempts.get(ip) || []).filter((t) => now - t < 15 * 60 * 1000);
+  if (recent.length >= 6) return res.status(429).json({ error: 'Too many attempts. Try again in 15 minutes.' });
+
+  const ok = DEMO_LOGIN_ENABLED || hasDeveloperAccess(req) || checkDeveloperKey(req.body.key);
+  if (!ok) {
+    unlockAttempts.set(ip, [...recent, now]);
+    return res.status(401).json({ error: developerKeyConfigured() ? 'That developer key is not valid.' : 'Developer mode is not configured on this server.' });
+  }
+  unlockAttempts.delete(ip);
+  res.json({ ok: true, developerToken: issueDeveloperToken(req.user?.email || 'developer-key'), demoAccounts: demoAccountCards() });
+});
+
+function demoAccountCards() {
+  return db.state.users
+    .filter((u) => u.isDemo)
+    .map((u) => ({ id: u.id, role: u.role, name: u.name, email: u.email, organisation: u.companyName || u.university || '' }));
+}
+
+app.get('/api/auth/developer/demo-accounts', optionalAuth, (req, res) => {
+  if (!demoAllowed(req)) return res.status(403).json({ error: 'Developer mode is locked.' });
+  res.json({ demoAccounts: demoAccountCards() });
+});
+
+app.post('/api/auth/demo-login', optionalAuth, (req, res) => {
+  if (!demoAllowed(req)) return res.status(403).json({ error: 'Demo login is disabled on this server.' });
+  const user = req.body.userId
+    ? db.state.users.find((u) => u.isDemo && u.id === req.body.userId)
+    : db.state.users.find((u) => u.isDemo && u.role === (req.body.role === 'admin' ? 'admin' : 'recruiter'));
+  if (!user) return res.status(404).json({ error: 'That demo account does not exist.' });
+  res.json(authResponse(user, `Signed in as ${user.name} (demo ${user.role === 'admin' ? 'registrar' : user.role}).`));
 });
 
 function buildNewUser(body, { role, email, name }) {
@@ -199,15 +265,30 @@ function buildNewUser(body, { role, email, name }) {
     ...uniqueDidFor(email, assignedId),
     createdAt: new Date().toISOString()
   };
+  if (requiresVerification(role)) {
+    // Staff and recruiters start locked until a registrar approves them.
+    user.accountStatus = ACCOUNT_STATUS.pending;
+    user.verificationRequestedAt = user.createdAt;
+    const proof = buildProofRecord(body.verificationProof);
+    if (proof) user.verificationProof = proof;
+  } else {
+    user.accountStatus = ACCOUNT_STATUS.verified;
+  }
   user.headline = headlineFor(user);
   return user;
 }
 
-function validateRoleFields(role, body) {
+function validateRoleFields(role, body, email) {
   if (!['student', 'recruiter', 'admin'].includes(role)) return 'Choose a valid account type.';
   if (role === 'recruiter' && !(body.companyName || '').trim()) return 'Company name is required for recruiter accounts.';
-  if (role === 'admin' && (body.verificationCode || '').trim() !== ADMIN_CODE) return 'Invalid institutional verification code.';
-  return null;
+  if (role === 'admin' && !(body.university || '').trim()) return 'Institution name is required for university accounts.';
+  return checkStaffRegistration(role, email, body.verificationProof);
+}
+
+function welcomeMessage(user) {
+  return user.accountStatus === ACCOUNT_STATUS.pending
+    ? 'Account created. A registrar will verify your role — you will get access as soon as it is approved.'
+    : `Welcome to TrustTrace, ${user.name}.`;
 }
 
 app.post('/api/auth/register', (req, res) => {
@@ -219,7 +300,7 @@ app.post('/api/auth/register', (req, res) => {
   if (!name || !email || !password) return res.status(400).json({ error: 'Name, email and password are required.' });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
   if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
-  const roleError = validateRoleFields(role, req.body);
+  const roleError = validateRoleFields(role, req.body, email);
   if (roleError) return res.status(400).json({ error: roleError });
 
   const existing = db.findUserByEmail(email);
@@ -246,7 +327,7 @@ app.post('/api/auth/register', (req, res) => {
   user.passwordHash = hashPassword(password);
   db.state.users.unshift(user);
   db.save(['users']);
-  res.json(authResponse(user, `Welcome to TrustTrace, ${user.name}.`));
+  res.json(authResponse(user, welcomeMessage(user)));
 });
 
 async function handleOAuth(req, res, verify) {
@@ -267,9 +348,9 @@ async function handleOAuth(req, res, verify) {
 
     // New account: the client supplies role and onboarding fields alongside the token.
     const role = req.body.role || 'student';
-    const roleError = validateRoleFields(role, req.body);
-    if (roleError) return res.status(400).json({ error: roleError, needsOnboarding: true });
     if (!identity.email) return res.status(400).json({ error: 'Your Apple ID did not share an email address. Please allow email sharing and try again.' });
+    const roleError = validateRoleFields(role, req.body, identity.email);
+    if (roleError) return res.status(400).json({ error: roleError, needsOnboarding: true });
 
     const name = (req.body.name || identity.name || identity.email.split('@')[0]).trim();
     user = buildNewUser(req.body, { role, email: identity.email.toLowerCase(), name });
@@ -277,7 +358,7 @@ async function handleOAuth(req, res, verify) {
     user.avatarUrl = identity.picture || '';
     db.state.users.unshift(user);
     db.save(['users']);
-    res.json(authResponse(user, `Welcome to TrustTrace, ${user.name}.`));
+    res.json(authResponse(user, welcomeMessage(user)));
   } catch (err) {
     res.status(401).json({ error: err.message || 'Sign-in failed.' });
   }
@@ -293,6 +374,21 @@ app.post('/api/auth/oauth/apple/callback', (req, res) => {
 });
 
 app.get('/api/auth/me', requireAuth, (req, res) => res.json({ user: selfUser(req.user) }));
+
+// Pending (or declined) staff can add or replace their proof document.
+app.post('/api/auth/verification-proof', requireAuth, (req, res) => {
+  const user = req.user;
+  if (!requiresVerification(user.role)) return res.status(400).json({ error: 'Only recruiter and university accounts need verification.' });
+  if (isActive(user)) return res.status(400).json({ error: 'Your account is already verified.' });
+  const error = validateProof(req.body.verificationProof) || (!req.body.verificationProof?.dataUrl && 'Attach your staff or corporate ID.');
+  if (error) return res.status(400).json({ error });
+  user.verificationProof = buildProofRecord(req.body.verificationProof);
+  user.accountStatus = ACCOUNT_STATUS.pending;
+  user.verificationRequestedAt = new Date().toISOString();
+  user.verificationNote = '';
+  db.save(['users']);
+  res.json({ user: selfUser(user), message: 'Document submitted. A registrar will review it shortly.' });
+});
 
 const PROFILE_FIELDS = ['name', 'university', 'program', 'headline', 'bio', 'location', 'companyName', 'jobTitle', 'companyWebsite', 'departmentRole', 'visibleInTalentSearch'];
 
@@ -396,8 +492,11 @@ app.post('/api/wallet/recover', (req, res) => {
 // Users, talent search, shortlists
 // ---------------------------------------------------------------------------
 app.get('/api/users', optionalAuth, (req, res) => {
-  const viewer = req.user;
+  // Accounts awaiting verification browse like a signed-out visitor.
+  const viewer = req.user && isActive(req.user) ? req.user : null;
   const isAdmin = viewer?.role === 'admin';
+  const showDemo = Boolean(viewer?.isDemo) || demoAllowed(req);
+  const listed = (u) => !u.pendingClaim && (showDemo || !u.isDemo) && (isAdmin || isActive(u));
   // Private and draft credentials are only visible to their owner and admins.
   const credentials = db.state.credentials.filter(
     (c) => isAdmin || c.studentUserId === viewer?.id || (c.isPublic !== false && c.state !== 'Draft')
@@ -410,9 +509,10 @@ app.get('/api/users', optionalAuth, (req, res) => {
 
   res.json({
     revision: currentRevision(),
-    students: db.state.users.filter((u) => u.role === 'student' && !u.pendingClaim).map(publicUser),
-    allUsers: db.state.users.filter((u) => !u.pendingClaim).map(publicUser),
-    me: viewer ? selfUser(viewer) : null,
+    students: db.state.users.filter((u) => u.role === 'student' && listed(u)).map(publicUser),
+    allUsers: db.state.users.filter(listed).map(publicUser),
+    me: req.user ? selfUser(req.user) : null,
+    accessRequests: isAdmin ? accessRequests() : [],
     logoRegistry: db.state.logoRegistry,
     recruiterShortlists: shortlists,
     credentials,
@@ -468,6 +568,39 @@ app.delete('/api/recruiter/:recruiterId/shortlist/:studentUserId', ...recruiterO
   db.state.recruiterShortlists[req.params.recruiterId] = list.filter((i) => i.studentUserId !== req.params.studentUserId);
   db.save(['shortlists']);
   res.json({ ok: true, shortlist: db.state.recruiterShortlists[req.params.recruiterId], message: 'Candidate removed from your shortlist.' });
+});
+
+// ---------------------------------------------------------------------------
+// Account verification queue (admin)
+// ---------------------------------------------------------------------------
+function accessRequests() {
+  return db.state.users
+    .filter((u) => requiresVerification(u.role) && (u.accountStatus === ACCOUNT_STATUS.pending || u.accountStatus === ACCOUNT_STATUS.rejected))
+    .map((u) => ({ ...publicUser(u), verification: verificationSummary(u) }))
+    .sort((a, b) => String(b.verification.submittedAt).localeCompare(String(a.verification.submittedAt)));
+}
+
+app.get('/api/admin/access-requests', requireRole('admin'), (_req, res) => res.json({ requests: accessRequests() }));
+
+app.get('/api/admin/access-requests/:userId/proof', requireRole('admin'), (req, res) => {
+  const user = db.findUserById(req.params.userId);
+  if (!user?.verificationProof) return res.status(404).json({ error: 'No document was uploaded for this account.' });
+  res.json({ proof: user.verificationProof });
+});
+
+app.post('/api/admin/access-requests/:userId/decision', requireRole('admin'), (req, res) => {
+  const user = db.findUserById(req.params.userId);
+  if (!user || !requiresVerification(user.role)) return res.status(404).json({ error: 'Account request not found.' });
+  if (user.id === req.user.id) return res.status(400).json({ error: 'You cannot review your own account.' });
+  const approve = req.body.decision === 'approve';
+  user.accountStatus = approve ? ACCOUNT_STATUS.verified : ACCOUNT_STATUS.rejected;
+  user.verificationReviewedAt = new Date().toISOString();
+  user.verificationReviewedBy = req.user.id;
+  user.verificationNote = String(req.body.note || '').trim().slice(0, 300);
+  // The document is only needed for the review.
+  if (approve) delete user.verificationProof;
+  db.save(['users']);
+  res.json({ ok: true, requests: accessRequests(), message: approve ? `${user.name} is now verified.` : `${user.name}'s request was declined.` });
 });
 
 // ---------------------------------------------------------------------------
@@ -536,8 +669,8 @@ async function handleVerifyUpload(req, res) {
   }
 }
 
-app.post('/api/certificates/verify-upload', requireAuth, handleVerifyUpload);
-app.post('/api/ai/scan-certificate', requireAuth, handleVerifyUpload);
+app.post('/api/certificates/verify-upload', requireRole('student', 'admin'), handleVerifyUpload);
+app.post('/api/ai/scan-certificate', requireRole('student', 'admin'), handleVerifyUpload);
 
 // ---------------------------------------------------------------------------
 // Issuance: students self-upload (requires a passing scan); admins issue directly.
@@ -584,6 +717,10 @@ function resolveIssuanceStudent(req) {
 app.post('/api/credentials/issue', requireRole('student', 'admin'), (req, res) => {
   const { achievementTitle, issuingOrganization, issuanceDate, competencyDomain, description = '', scanId } = req.body;
   const isAdmin = req.user.role === 'admin';
+  const achievementType = CATEGORIES.includes(req.body.achievementType) ? req.body.achievementType : 'Other';
+  const requiresScoring = Boolean(req.body.requiresScoring);
+  const achievementResult = requiresScoring ? String(req.body.achievementResult || '').trim().slice(0, 60) : '';
+  if (requiresScoring && !achievementResult) return res.status(400).json({ error: 'Enter the result or placement, or turn off scoring.' });
 
   let scan = null;
   if (scanId) {
@@ -636,7 +773,9 @@ app.post('/api/credentials/issue', requireRole('student', 'admin'), (req, res) =
     }
   });
 
-  const queue = req.body.validationMode === 'queue';
+  // Possible edits found by the scanner always go to a registrar.
+  const forcedReview = scan?.forensics.outcome === 'review';
+  const queue = req.body.validationMode === 'queue' || forcedReview;
   const tokenId = queue ? null : db.state.meta.nextTokenId++;
   const tx = queue
     ? logTx({ txHash: 'PENDING_ADMIN_APPROVAL', blockNumber: db.state.meta.nextBlockNumber, event: 'CredentialQueuedForAdmin (Draft)', method: 'submitCandidateDraft(string,bytes32)', tokenId: 0, holderSoul: student.walletAddress, ipfsCid: signed.ipfsCid, credentialHash: signed.credentialHash, consensus: 'IBFT 2.0 PoA Queue' })
@@ -655,6 +794,9 @@ app.post('/api/credentials/issue', requireRole('student', 'admin'), (req, res) =
     issuingOrganization: signed.verifiableCredential.credentialSubject.issuingOrganization,
     issuanceDate: isoDate,
     competencyDomain,
+    achievementType,
+    requiresScoring,
+    achievementResult,
     attainedLevel,
     masteryScore,
     description,
@@ -678,7 +820,11 @@ app.post('/api/credentials/issue', requireRole('student', 'admin'), (req, res) =
   res.json({
     ok: true,
     credential,
-    message: queue ? 'Sent to the registrar for approval.' : `Verified and minted as Soulbound Token #${tokenId}.`
+    message: forcedReview
+      ? 'Sent to the registrar — the scan found possible edits that need a human check.'
+      : queue
+      ? 'Sent to the registrar for approval.'
+      : `Verified and minted as Soulbound Token #${tokenId}.`
   });
 });
 
@@ -914,6 +1060,7 @@ const PORT = process.env.PORT || 3001;
 if (!process.env.VERCEL) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[TrustTrace] API listening on http://0.0.0.0:${PORT}`);
+    warmUpLayoutOcr();
   });
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') console.log(`[TrustTrace] Port ${PORT} is already in use; another instance is serving the API.`);

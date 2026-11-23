@@ -10,6 +10,7 @@ const DATA_DIR = path.resolve(process.cwd(), 'server', 'data');
 const JSON_DB_PATH = path.join(DATA_DIR, 'trusttrace_db.json');
 const LEGACY_JSON_DB_PATH = path.join(DATA_DIR, 'trusttrace-db.json');
 const MAX_TX_LOGS = 500;
+const DEMO_ACCOUNT_IDS = new Set(['demo-recruiter-global', 'demo-admin-registrar']);
 
 // Documents keep their app-level string `id`; Mongo's _id stays internal.
 // `strict: false` lets VC payloads and forensic reports round-trip untouched.
@@ -22,6 +23,13 @@ const UserSchema = new mongoose.Schema(
     email: { type: String, unique: true, sparse: true, lowercase: true, trim: true },
     passwordHash: String,
     role: { type: String, enum: ['student', 'recruiter', 'admin'], default: 'student', index: true },
+    accountStatus: { type: String, enum: ['verified', 'pending_verification', 'rejected'], default: 'verified', index: true },
+    isDemo: Boolean,
+    verificationProof: mongoose.Schema.Types.Mixed,
+    verificationRequestedAt: String,
+    verificationReviewedAt: String,
+    verificationReviewedBy: String,
+    verificationNote: String,
     authProviders: [{ provider: String, subject: String, linkedAt: String, _id: false }],
     avatarUrl: String,
     fieldOfStudy: String,
@@ -58,6 +66,9 @@ const CredentialSchema = new mongoose.Schema(
     issuingOrganization: String,
     issuanceDate: String,
     competencyDomain: String,
+    achievementType: String,
+    requiresScoring: Boolean,
+    achievementResult: String,
     attainedLevel: String,
     masteryScore: Number,
     state: { type: String, enum: ['Draft', 'Signed', 'Anchored', 'Locked', 'Revoked'], default: 'Locked', index: true },
@@ -143,6 +154,8 @@ function createInitialState() {
     email: 'recruiter@company.com',
     passwordHash: hashPassword('recruiter123'),
     role: 'recruiter',
+    isDemo: true,
+    accountStatus: 'verified',
     authProviders: [],
     avatarUrl: '',
     companyName: 'Global Tech Corp',
@@ -162,6 +175,8 @@ function createInitialState() {
     email: 'registrar@university.edu',
     passwordHash: hashPassword('admin123'),
     role: 'admin',
+    isDemo: true,
+    accountStatus: 'verified',
     authProviders: [],
     avatarUrl: '',
     university: 'Global Institute of Technology',
@@ -221,6 +236,9 @@ function withDefaults(state) {
   for (const user of state.users) {
     user.authProviders ||= [];
     if (user.email) user.email = user.email.toLowerCase();
+    // Accounts created before verification existed were already trusted.
+    user.accountStatus ||= 'verified';
+    if (DEMO_ACCOUNT_IDS.has(user.id)) user.isDemo = true;
   }
   return state;
 }

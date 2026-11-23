@@ -3,11 +3,13 @@ import '../services/api_service.dart';
 import '../theme/trusttrace_theme.dart';
 import '../core/skill_taxonomy.dart';
 import '../widgets/common.dart';
+import '../widgets/access_requests_card.dart';
 
 class AdminPortalScreen extends StatefulWidget {
   final Map<String, dynamic> adminUser;
   final List<Map<String, dynamic>> students;
   final List<Map<String, dynamic>> credentials;
+  final List<Map<String, dynamic>> accessRequests;
   final VoidCallback onRefresh;
 
   const AdminPortalScreen({
@@ -15,6 +17,7 @@ class AdminPortalScreen extends StatefulWidget {
     required this.adminUser,
     required this.students,
     required this.credentials,
+    this.accessRequests = const [],
     required this.onRefresh,
   });
 
@@ -179,6 +182,8 @@ class _AdminPortalScreenState extends State<AdminPortalScreen> {
         ),
         const SizedBox(height: 12),
 
+        AccessRequestsCard(requests: widget.accessRequests, onChanged: widget.onRefresh),
+
         // Pending Approval Queue
         Card(
           child: Padding(
@@ -247,6 +252,15 @@ class _AdminPortalScreenState extends State<AdminPortalScreen> {
                               color: Colors.grey,
                             ),
                           ),
+                          const SizedBox(height: 6),
+                          CredentialTags(d),
+                          if (d['aiForensics']?['outcome'] == 'review')
+                            for (final reason in (d['aiForensics']['reviewReasons'] as List? ?? const []))
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Text('• ${'$reason'.replaceFirst(RegExp(r'^Gate \d: '), '')}',
+                                    style: const TextStyle(fontSize: 11.5, color: TrustTraceTheme.warningAmber)),
+                              ),
                           const SizedBox(height: 10),
                           Wrap(
                             spacing: 8,

@@ -3,6 +3,7 @@ import { CheckCircle2, X, WifiOff } from 'lucide-react';
 import Navbar from './components/Navbar.jsx';
 import AuthScreen from './components/AuthScreen.jsx';
 import PublicVerifyPage from './components/PublicVerifyPage.jsx';
+import PendingVerificationScreen from './components/PendingVerificationScreen.jsx';
 import StudentPortal from './portals/StudentPortal.jsx';
 import RecruiterPortal from './portals/RecruiterPortal.jsx';
 import AdminPortal from './portals/AdminPortal.jsx';
@@ -38,6 +39,7 @@ export default function App() {
   const [credentials, setCredentials] = useState([]);
   const [logoRegistry, setLogoRegistry] = useState([]);
   const [recruiterShortlists, setRecruiterShortlists] = useState({});
+  const [accessRequests, setAccessRequests] = useState([]);
   const [txLogs, setTxLogs] = useState([]);
   const [dbStatus, setDbStatus] = useState(null);
   const [issuerDidDocument, setIssuerDidDocument] = useState(null);
@@ -95,6 +97,7 @@ export default function App() {
       setTxLogs(usersData.txLogs?.length ? usersData.txLogs : statusData?.txLogs || []);
       if (usersData.logoRegistry) setLogoRegistry(usersData.logoRegistry);
       setRecruiterShortlists(usersData.recruiterShortlists || {});
+      setAccessRequests(usersData.accessRequests || []);
     }
   }, []);
 
@@ -107,7 +110,12 @@ export default function App() {
       cacheIssuerDid(statusData.issuerDidDocument);
       if (getToken()) {
         if (usersData.me) {
-          setCurrentUser(usersData.me);
+          setCurrentUser((prev) => {
+            if (prev && prev.accountStatus !== 'verified' && usersData.me.accountStatus === 'verified') {
+              setToast('Your account has been verified. Welcome to TrustTrace.');
+            }
+            return usersData.me;
+          });
           setSession(getToken(), usersData.me);
         } else {
           // Token no longer maps to an account (deleted or expired).
@@ -255,6 +263,24 @@ export default function App() {
     );
   }
 
+  if ((currentUser.accountStatus || 'verified') !== 'verified') {
+    return (
+      <>
+        {toastEl}
+        <PendingVerificationScreen
+          user={currentUser}
+          customLogoUrl={customLogoUrl}
+          onUserUpdated={(user) => {
+            setSession(getToken(), user);
+            setCurrentUser(user);
+          }}
+          onLogout={() => logout()}
+          onNotify={showToast}
+        />
+      </>
+    );
+  }
+
   const draftQueueCount = credentials.filter((c) => c.state === 'Draft').length;
   const openProof = (cred) => setProofTarget({ open: true, credential: cred });
 
@@ -322,6 +348,10 @@ export default function App() {
             onChangeState={handleChangeState}
             onRevokeCredential={handleRevokeCredential}
             onDeleteCredential={handleDeleteCredential}
+            accessRequests={accessRequests}
+            onReviewAccess={(userId, decision, note) =>
+              act(`/api/admin/access-requests/${userId}/decision`, { method: 'POST', body: { decision, note } })
+            }
             onManualIssued={async (_cred, msg) => {
               await fetchAllData();
               showToast(msg);

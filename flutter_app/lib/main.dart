@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'screens/admin_portal_screen.dart';
 import 'screens/auth_screen.dart';
+import 'screens/pending_verification_screen.dart';
 import 'screens/profile_settings_screen.dart';
 import 'screens/qr_verifier_screen.dart';
 import 'screens/student_wallet_screen.dart';
@@ -28,6 +29,7 @@ class _TrustTraceAppState extends State<TrustTraceApp> with WidgetsBindingObserv
   Map<String, dynamic>? _user = ApiService.currentUser;
   List<Map<String, dynamic>> _students = [];
   List<Map<String, dynamic>> _credentials = [];
+  List<Map<String, dynamic>> _accessRequests = [];
   bool _offline = false;
   int _tab = 0;
   Timer? _poll;
@@ -70,7 +72,17 @@ class _TrustTraceAppState extends State<TrustTraceApp> with WidgetsBindingObserv
       _offline = data['offline'] == true;
       _students = ApiService.listOf(data['students']);
       _credentials = ApiService.credentialsOf(data['credentials']);
-      if (_user != null) _user = ApiService.currentUser ?? _user;
+      _accessRequests = ApiService.listOf(data['accessRequests']);
+      if (_user != null) {
+        final next = ApiService.currentUser ?? _user;
+        final wasPending = (_user?['accountStatus'] ?? 'verified') != 'verified';
+        if (wasPending && next?['accountStatus'] == 'verified') {
+          _messengerKey.currentState?.showSnackBar(
+            const SnackBar(content: Text('Your account has been verified. Welcome to TrustTrace.'), behavior: SnackBarBehavior.floating),
+          );
+        }
+        _user = next;
+      }
     });
   }
 
@@ -123,11 +135,27 @@ class _TrustTraceAppState extends State<TrustTraceApp> with WidgetsBindingObserv
     );
   }
 
+  Widget _pendingShell(Map<String, dynamic> user) {
+    return Scaffold(
+      appBar: AppBar(
+        titleSpacing: 14,
+        title: const Row(children: [
+          BrandLogoBadge(size: 30, borderRadius: 8),
+          SizedBox(width: 10),
+          Flexible(child: Text('TrustTrace', overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
+        ]),
+        actions: const [ThemeSwitcherBar(), SizedBox(width: 8)],
+      ),
+      body: SafeArea(child: PendingVerificationScreen(user: user, onRefresh: _refresh, onLogout: () => _signOut())),
+    );
+  }
+
   Widget _shell() {
     final user = _user!;
     final role = TrustTraceTheme.normalizeRole(user['role']);
+    if ((user['accountStatus'] ?? 'verified') != 'verified') return _pendingShell(user);
     final home = switch (role) {
-      'admin' => AdminPortalScreen(adminUser: user, students: _students, credentials: _credentials, onRefresh: _refresh),
+      'admin' => AdminPortalScreen(adminUser: user, students: _students, credentials: _credentials, accessRequests: _accessRequests, onRefresh: _refresh),
       'recruiter' => QrVerifierScreen(recruiter: user, students: _students, credentials: _credentials, offline: _offline),
       _ => StudentWalletScreen(student: user, credentials: _credentials, offline: _offline, onRefresh: _refresh),
     };

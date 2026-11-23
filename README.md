@@ -17,14 +17,30 @@ npm run dev                   # web on :5173, API on :3001
 ```
 
 Without `MONGODB_URI`, data is stored in `server/data/trusttrace_db.json` (git-ignored).
-`npm run db:reset` wipes it back to the two demo accounts:
+`npm run db:reset` wipes it back to the two demo accounts.
+
+### Recruiter & university staff accounts
+
+New recruiter and staff accounts start as **pending verification**. They must sign up with a
+company / university email, or upload a staff or corporate ID (personal addresses like Gmail need the
+ID; disposable inboxes are refused). A verified registrar approves or declines them under
+**Account requests** in the registrar portal; the pending screen updates live when they do.
+
+### Developer mode (demo accounts)
+
+The demo accounts are hidden from the sign-in screen and locked in production.
+
+1. Set `DEVELOPER_ACCESS_KEY` (and optionally `DEVELOPER_EMAILS`) in `.env`.
+2. On the sign-in screen (web or app), tap **TrustTrace v2.1.0** at the bottom 7 times.
+3. Enter the key. The two demo accounts appear; tap one to sign in.
+
+Signing in with an address listed in `DEVELOPER_EMAILS` unlocks the same panel without a key. During
+`npm run dev` (not production) no key is needed.
 
 | Role | Email | Password |
 | --- | --- | --- |
 | Recruiter | recruiter@company.com | recruiter123 |
 | Registrar | registrar@university.edu | admin123 |
-
-New university-admin accounts need `ADMIN_VERIFICATION_CODE` (default `ADMIN-VERIFY-2026`).
 
 ### Exhibition / offline laptop
 
@@ -70,14 +86,31 @@ web appear on mobile immediately via `GET /api/events` (server-sent events).
 ## Tests
 
 ```bash
-npm run test:flutter   # crypto parity with the server + small-screen layout checks
+npm run test:flutter   # crypto parity, taxonomy, camera crop, small-screen layout checks
 ```
+
+## Shared data
+
+`shared/skillTaxonomy.js` (fields of study and radar axes) and `shared/emailDomains.js` are the source
+of truth. After editing either, run `npm run gen:taxonomy` to regenerate the Dart copies.
 
 ## Scanner notes
 
-- Name matching (gate 2) needs readable text. It uses the macOS Vision helper
-  (`server/crypto/mac_vision_ocr`) when the server runs on a Mac, or Gemini when `GEMINI_API_KEY` is
-  set. Without either, it can't read the recipient name and binds the credential to the signed-in
-  account instead.
+| Gate | Checks |
+| --- | --- |
+| 1 Layout | 3D desk/table renders (flat scans and PDFs pass) |
+| 2 Recipient | Fuzzy match of the printed name against the account |
+| 3 AI template | Known AI-generated template content |
+| 4 Issuer & event | Online cross-check: Wikipedia + DNS (no key), plus Brave/Google search if configured |
+| 5 Metadata | AI image-generator signatures |
+| 6 Tamper forensics | Edited names: multi-quality error level analysis (JPEG ghosts), sensor-noise mismatch, alignment/skew, in-sentence font metrics; PDFs: editor tools, incremental edits, overlaid text boxes |
+
+Strong evidence rejects the certificate; moderate evidence sends it to a registrar ("Needs review").
+The scanner also auto-fills the form: title (largest/centred text + event keywords), issuer, date,
+type (Competition / Hackathon / Workshop / Seminar) and result ("1st Place", "CGPA 3.85").
+
+- Text positions come from Google Cloud Vision (`GOOGLE_VISION_API_KEY`), the macOS Vision helper
+  (`server/ocr/vision_layout`, rebuild with `npm run build:ocr`), or Gemini. Without any of them the
+  name-region forensics are skipped and file-level checks still run.
 - Gate 1 flags only clearly skewed "certificate on a desk" scenes. Flat scans, PDFs and bordered
   designs pass.

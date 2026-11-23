@@ -30,6 +30,8 @@ import {
   Layers
 } from 'lucide-react';
 import { axisNames } from '../../shared/skillTaxonomy.js';
+import AccessRequestsPanel from '../components/AccessRequestsPanel.jsx';
+import { CredentialTags } from '../components/CredentialTags.jsx';
 
 ChartJS.register(
   CategoryScale,
@@ -60,7 +62,9 @@ export default function AdminPortal({
   onManualIssued,
   onOpenProofModal,
   onRefreshData,
-  onNotify
+  onNotify,
+  accessRequests = [],
+  onReviewAccess
 }) {
   const [activeSubTab, setActiveSubTab] = useState('issuance'); // 'issuance' | 'registry' | 'benchmark' | 'ledger'
   const [issuing, setIssuing] = useState(false);
@@ -316,6 +320,7 @@ export default function AdminPortal({
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
           {/* Left 7 Columns: Pending Approval Queue + Credential Lifecycle List */}
           <div className="lg:col-span-7 space-y-5">
+            <AccessRequestsPanel requests={accessRequests} onReview={onReviewAccess} />
             {/* Pending Approval Queue */}
             <div className="linkedin-card p-4 sm:p-5">
               <div className="flex items-center justify-between pb-3 border-b border-[#E0DFDC] dark:border-[#30363D]">
@@ -343,14 +348,18 @@ export default function AdminPortal({
                         <div className="text-xs text-[#666666] dark:text-[#8B949E]">
                           {draft.studentName} ({draft.studentId}) • {draft.competencyDomain}
                         </div>
-                        <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
-                          <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold">
-                            AI Score: {draft.aiForensics?.overallConfidence || 95}%
-                          </span>
-                          <span className="text-[#666666] dark:text-[#8B949E]">
-                            Logo: {draft.aiForensics?.logoCheck || 96}% • Typo: {draft.aiForensics?.signatureCheck || 95}%
-                          </span>
-                        </div>
+                        <CredentialTags credential={draft} />
+                        {draft.aiForensics?.outcome === 'review' ? (
+                          <ul className="text-[11px] text-amber-800 dark:text-amber-300 space-y-0.5">
+                            {(draft.aiForensics.reviewReasons || []).map((reason) => (
+                              <li key={reason}>• {reason.replace(/^Gate \d: /, '')}</li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="text-[11px] text-[#666666] dark:text-[#8B949E]">
+                            {draft.aiForensics?.overallConfidence != null ? `Scanner: ${draft.aiForensics.verdict || `${draft.aiForensics.overallConfidence}%`}` : 'Submitted for review by the student'}
+                          </p>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-2 shrink-0">

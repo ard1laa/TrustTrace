@@ -41,6 +41,10 @@ class ApiService {
   static const _kDashboard = 'dashboard_cache';
   static const _kIssuerDid = 'issuer_did_document';
   static const _kTheme = 'theme_mode';
+  static const _kDevToken = 'developer_token';
+
+  /// Presenter tools: set while developer mode is unlocked. Survives sign-out.
+  static final ValueNotifier<String?> developerTokenNotifier = ValueNotifier<String?>(null);
 
   static String get webOrigin => apiBaseUrl.replaceFirst(RegExp(r'/api/?$'), '');
   static bool get isSignedIn => _token != null && currentUser != null;
@@ -52,6 +56,7 @@ class ApiService {
     await LocalStore.init();
     apiBaseUrl = LocalStore.getString(_kBaseUrl) ?? _defaultBaseUrl;
     _token = LocalStore.getString(_kToken);
+    developerTokenNotifier.value = LocalStore.getString(_kDevToken);
     currentUser = LocalStore.getJson(_kUser);
     if (_token == null) currentUser = null;
     final theme = LocalStore.getString(_kTheme);
@@ -105,6 +110,7 @@ class ApiService {
     final headers = <String, String>{
       'Content-Type': 'application/json',
       if (_token != null) 'Authorization': 'Bearer $_token',
+      if (developerTokenNotifier.value != null) 'x-developer-token': developerTokenNotifier.value!,
     };
     final uri = Uri.parse('$apiBaseUrl$path');
     final encoded = body == null ? null : jsonEncode(body);
@@ -137,8 +143,14 @@ class ApiService {
     final res = await _request('POST', path, body: body);
     if (res.ok && res.data['token'] != null && res.data['user'] is Map) {
       await _saveSession(res.data['token'].toString(), Map<String, dynamic>.from(res.data['user'] as Map));
+      if (res.data['developerToken'] != null) await setDeveloperToken(res.data['developerToken'].toString());
     }
     return res;
+  }
+
+  static Future<void> setDeveloperToken(String? token) async {
+    developerTokenNotifier.value = token;
+    await LocalStore.setString(_kDevToken, token);
   }
 
   // ---------------------------------------------------------------------------
@@ -154,7 +166,28 @@ class ApiService {
 
   static Future<ApiResult> register(Map<String, dynamic> payload) => _authCall('/auth/register', payload);
 
-  static Future<ApiResult> demoLogin(String role) => _authCall('/auth/demo-login', {'role': role});
+  // Developer mode (hidden): unlock with the server's developer key, then sign
+  // in to any demo account in one tap.
+  static Future<ApiResult> developerUnlock(String key) async {
+    final res = await _request('POST', '/auth/developer/unlock', body: {'key': key.trim()});
+    if (res.ok && res.data['developerToken'] != null) await setDeveloperToken(res.data['developerToken'].toString());
+    return res;
+  }
+
+  static Future<List<Map<String, dynamic>>> demoAccounts() async {
+    final res = await _request('GET', '/auth/developer/demo-accounts', timeout: const Duration(seconds: 6));
+    if (res.status == 403) await setDeveloperToken(null);
+    return res.ok ? credentialsOf(res.data['demoAccounts']) : [];
+  }
+
+  static Future<ApiResult> demoLoginAs(String userId) => _authCall('/auth/demo-login', {'userId': userId});
+
+  static Future<ApiResult> submitVerificationProof(String dataUrl, String fileName) async {
+    final res = await _request('POST', '/auth/verification-proof',
+        body: {'verificationProof': {'dataUrl': dataUrl, 'fileName': fileName}}, timeout: const Duration(seconds: 30));
+    if (res.ok && res.data['user'] is Map) await _saveSession(_token, Map<String, dynamic>.from(res.data['user'] as Map));
+    return res;
+  }
 
   static Future<ApiResult> oauthSignIn(String provider, String idToken, Map<String, dynamic> extras) =>
       _authCall('/auth/oauth/$provider', {...extras, 'idToken': idToken});
@@ -249,6 +282,17 @@ class ApiService {
 
   static Future<ApiResult> revokeCredential(String credId) =>
       _request('POST', '/credentials/$credId/revoke', body: {'reason': 'Revoked by the registrar.'});
+
+  // ---------------------------------------------------------------------------
+  // Account verification queue (registrar)
+  // ---------------------------------------------------------------------------
+  static Future<ApiResult> reviewAccess(String userId, String decision, {String note = ''}) =>
+      _request('POST', '/admin/access-requests/$userId/decision', body: {'decision': decision, 'note': note});
+
+  static Future<Map<String, dynamic>?> accessProof(String userId) async {
+    final res = await _request('GET', '/admin/access-requests/$userId/proof', timeout: const Duration(seconds: 20));
+    return res.ok && res.data['proof'] is Map ? Map<String, dynamic>.from(res.data['proof'] as Map) : null;
+  }
 
   static Future<ApiResult> verifyLookup(String lookup) =>
       _request('POST', '/verify', body: {'candidateLookup': lookup}, timeout: const Duration(seconds: 8));

@@ -1,5 +1,6 @@
 const TOKEN_KEY = 'trusttrace_token';
 const USER_KEY = 'trusttrace_active_user';
+const DEV_KEY = 'trusttrace_developer_token';
 
 function safeGet(key) {
   try {
@@ -42,10 +43,33 @@ export function clearSession() {
   setSession(null, null);
 }
 
+// Developer mode survives sign-out so a presenter can switch demo accounts.
+let developerToken = safeGet(DEV_KEY);
+
+export function getDeveloperToken() {
+  return developerToken;
+}
+
+export function setDeveloperToken(token) {
+  developerToken = token || null;
+  safeSet(DEV_KEY, developerToken);
+  window.dispatchEvent(new CustomEvent('trusttrace:developer-mode', { detail: Boolean(developerToken) }));
+}
+
+export function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Could not read that file.'));
+    reader.readAsDataURL(file);
+  });
+}
+
 // fetch() wrapper that attaches the session token and signals expiry.
 export async function apiFetch(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (memoryToken) headers.set('Authorization', `Bearer ${memoryToken}`);
+  if (developerToken) headers.set('x-developer-token', developerToken);
   if (options.body && typeof options.body === 'string' && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }

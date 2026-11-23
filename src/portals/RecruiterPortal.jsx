@@ -23,6 +23,7 @@ import CompetencyRadarChart from '../components/CompetencyRadarChart.jsx';
 import VerificationResultView from '../components/VerificationResultView.jsx';
 import Avatar from '../components/Avatar.jsx';
 import { FIELDS, resolveField, axisForCredential, axisColor } from '../../shared/skillTaxonomy.js';
+import { CredentialTags } from '../components/CredentialTags.jsx';
 import { decodePortfolioText } from '../lib/portfolioQr.js';
 import { verifyScannedText } from '../lib/verification.js';
 
@@ -289,7 +290,7 @@ export default function RecruiterPortal({
 
         // 2. Field of study filter
         if (domainFilter !== 'ALL') {
-          if (resolveField(stu.fieldOfStudy || stu.program).id !== domainFilter) return false;
+          if (resolveField(stu.fieldOfStudy || stu.program).familyId !== domainFilter) return false;
         }
 
         // 3. Check Minimum Score filter (if student has credentials, or if minScore > 0)
@@ -548,6 +549,7 @@ export default function RecruiterPortal({
                                     day: 'numeric'
                                   })}
                                 </div>
+                                <CredentialTags credential={cred} className="mt-1.5" />
 
                                 <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                                   <span

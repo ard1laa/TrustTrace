@@ -4,6 +4,7 @@ import Avatar from './Avatar.jsx';
 import CompetencyRadarChart from './CompetencyRadarChart.jsx';
 import D3CompetencyGraph from './D3CompetencyGraph.jsx';
 import { resolveField, axisForCredential, axisColor } from '../../shared/skillTaxonomy.js';
+import { CredentialTags } from './CredentialTags.jsx';
 
 function StatusBadge({ cred }) {
   if (cred.revoked) return <span className="chip bg-red-500/15 text-red-700 dark:text-red-300"><Ban className="w-3 h-3" /> Revoked</span>;
@@ -80,6 +81,7 @@ export default function VerificationResultView({ result, isDark, actions }) {
                     <div className="flex flex-wrap gap-1.5 mt-1.5">
                       <span className="chip text-white" style={{ backgroundColor: axisColor(field.id, axis) }}>{axis}</span>
                       <StatusBadge cred={c} />
+                      <CredentialTags credential={c} />
                     </div>
                   </div>
                 </li>

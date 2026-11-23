@@ -55,36 +55,139 @@ class UserAvatar extends StatelessWidget {
   }
 }
 
+/// Programme picker: a field that opens a searchable, grouped bottom sheet.
 class FieldDropdown extends StatelessWidget {
   final String? value;
   final ValueChanged<String> onChanged;
-  const FieldDropdown({super.key, required this.value, required this.onChanged});
+  final String label;
+  const FieldDropdown({super.key, required this.value, required this.onChanged, this.label = 'Programme'});
 
   @override
   Widget build(BuildContext context) {
-    final selected = SkillTaxonomy.fields.where((f) => f.id == value).firstOrNull;
+    final selected = value == null || value!.isEmpty ? null : SkillTaxonomy.resolve(value);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        DropdownButtonFormField<String>(
-          isExpanded: true,
-          initialValue: selected?.id,
-          hint: const Text('Select your field'),
-          decoration: const InputDecoration(labelText: 'Field of study', border: OutlineInputBorder(), isDense: true),
-          items: SkillTaxonomy.fields
-              .map((f) => DropdownMenuItem(value: f.id, child: Text(f.label, overflow: TextOverflow.ellipsis)))
-              .toList(),
-          onChanged: (v) => v == null ? null : onChanged(v),
+        InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () async {
+            final picked = await showProgramPicker(context, selectedId: selected?.id);
+            if (picked != null) onChanged(picked);
+          },
+          child: InputDecorator(
+            isEmpty: selected == null,
+            decoration: InputDecoration(
+              labelText: label,
+              hintText: 'Search your programme',
+              border: const OutlineInputBorder(),
+              isDense: true,
+              suffixIcon: const Icon(Icons.unfold_more_rounded, size: 20),
+            ),
+            child: selected == null ? null : Text(selected.label, maxLines: 1, overflow: TextOverflow.ellipsis),
+          ),
         ),
         if (selected != null)
           Padding(
             padding: const EdgeInsets.only(top: 6, left: 2),
             child: Text(
-              'Your skill radar will show: ${selected.axisNames.join(', ')}.',
+              'Skill radar: ${selected.axisNames.join(' · ')}',
               style: TextStyle(fontSize: 11.5, color: Theme.of(context).hintColor),
             ),
           ),
       ],
+    );
+  }
+}
+
+Future<String?> showProgramPicker(BuildContext context, {String? selectedId}) {
+  return showModalBottomSheet<String>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (_) => _ProgramPickerSheet(selectedId: selectedId),
+  );
+}
+
+class _ProgramPickerSheet extends StatefulWidget {
+  final String? selectedId;
+  const _ProgramPickerSheet({this.selectedId});
+
+  @override
+  State<_ProgramPickerSheet> createState() => _ProgramPickerSheetState();
+}
+
+class _ProgramPickerSheetState extends State<_ProgramPickerSheet> {
+  String _query = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final q = _query.trim().toLowerCase();
+    final groups = SkillTaxonomy.groups
+        .map((g) => ProgramGroup(
+              g.family,
+              q.isEmpty
+                  ? g.programs
+                  : g.programs.where((p) => [p.label, g.family.label, ...p.aliases].any((s) => s.toLowerCase().contains(q))).toList(),
+            ))
+        .where((g) => g.programs.isNotEmpty)
+        .toList();
+    final hint = Theme.of(context).hintColor;
+
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.85,
+      minChildSize: 0.5,
+      maxChildSize: 0.95,
+      builder: (context, scroll) => Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: TextField(
+              autofocus: true,
+              onChanged: (v) => setState(() => _query = v),
+              decoration: InputDecoration(
+                hintText: 'Search — e.g. Accounting, Law, Nursing',
+                prefixIcon: const Icon(Icons.search, size: 20),
+                filled: true,
+                isDense: true,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
+              ),
+            ),
+          ),
+          Expanded(
+            child: groups.isEmpty
+                ? Center(child: Text('No match — choose “Other”.', style: TextStyle(color: hint)))
+                : ListView(
+                    controller: scroll,
+                    padding: const EdgeInsets.only(bottom: 24),
+                    children: [
+                      for (final g in groups) ...[
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 14, 20, 4),
+                          child: Text(g.family.label.toUpperCase(),
+                              style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800, letterSpacing: 0.7, color: hint)),
+                        ),
+                        for (final p in g.programs)
+                          ListTile(
+                            dense: true,
+                            visualDensity: VisualDensity.compact,
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 20),
+                            title: Text(p.label,
+                                style: TextStyle(
+                                  fontSize: 14.5,
+                                  fontWeight: p.id == widget.selectedId ? FontWeight.w700 : FontWeight.w500,
+                                  color: p.id == widget.selectedId ? TrustTraceTheme.linkedInBlue : null,
+                                )),
+                            trailing: p.id == widget.selectedId ? const Icon(Icons.check_rounded, color: TrustTraceTheme.linkedInBlue, size: 20) : null,
+                            onTap: () => Navigator.pop(context, p.id),
+                          ),
+                      ],
+                    ],
+                  ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -166,4 +269,35 @@ void showToast(BuildContext context, String message, {bool error = false}) {
       behavior: SnackBarBehavior.floating,
       backgroundColor: error ? TrustTraceTheme.dangerRed : null,
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Certificate categories ("Hackathon") and results ("1st Place")
+// ---------------------------------------------------------------------------
+const kCategories = ['Competition', 'Hackathon', 'Workshop', 'Seminar', 'Other'];
+
+(IconData, Color) categoryStyle(String? type) => switch (type) {
+      'Competition' => (Icons.emoji_events_outlined, const Color(0xFFB45309)),
+      'Hackathon' => (Icons.code_rounded, const Color(0xFF7C3AED)),
+      'Workshop' => (Icons.construction_rounded, const Color(0xFF0F766E)),
+      'Seminar' => (Icons.mic_none_rounded, const Color(0xFF0369A1)),
+      _ => (Icons.sell_outlined, const Color(0xFF6B7280)),
+    };
+
+/// Category and result chips for a credential; empty when neither is set.
+class CredentialTags extends StatelessWidget {
+  final Map<String, dynamic> cred;
+  const CredentialTags(this.cred, {super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final type = cred['achievementType']?.toString();
+    final result = cred['requiresScoring'] == true ? '${cred['achievementResult'] ?? ''}' : '';
+    if ((type == null || type.isEmpty) && result.isEmpty) return const SizedBox.shrink();
+    final (icon, color) = categoryStyle(type);
+    return Wrap(spacing: 6, runSpacing: 6, children: [
+      if (type != null && type.isNotEmpty) Pill(type, color: color, icon: icon),
+      if (result.isNotEmpty) Pill(result, color: TrustTraceTheme.linkedInBlue, icon: Icons.military_tech_outlined),
+    ]);
+  }
 }
