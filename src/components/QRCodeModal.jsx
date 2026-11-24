@@ -1,28 +1,39 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import QRCode from 'qrcode';
-import { X, Download, Copy, Check, ExternalLink, FileJson, WifiOff } from 'lucide-react';
-import { buildPortfolioPayload, encodePortfolioUrl, MAX_QR_CREDENTIALS } from '../lib/portfolioQr.js';
+import { X, Download, Copy, Check, ExternalLink, FileJson, WifiOff, Zap } from 'lucide-react';
+import { buildPortfolioPayload, encodePortfolioUrl, shareLink, MAX_QR_CREDENTIALS } from '../lib/portfolioQr.js';
 import { resolveField } from '../../shared/skillTaxonomy.js';
 
-// The QR embeds signed claims, so recruiters can verify it even with no connection.
+// Default: a short link QR (sparse, scans from a distance; the scanner fetches
+// and verifies the signed credentials). Offline mode embeds the signed claims
+// so a recruiter with no connection can still check them.
 export default function QRCodeModal({ isOpen, onClose, credential, student, credentials = [] }) {
   const [qrDataUrl, setQrDataUrl] = useState('');
   const [copied, setCopied] = useState(false);
+  const [offlineMode, setOfflineMode] = useState(false);
   const isPortfolio = !credential;
+  const shortCode = isPortfolio ? student?.shareCode : credential?.shareCode;
+  const useShort = Boolean(shortCode) && !offlineMode;
 
   const { url, payload } = useMemo(() => {
     if (!isOpen || !student) return { url: '', payload: null };
+    if (useShort) return { url: shareLink(shortCode), payload: null };
     const source = isPortfolio ? credentials.filter((c) => c.studentUserId === student.id) : [credential];
     const p = buildPortfolioPayload(student, source);
     return { url: encodePortfolioUrl(p), payload: p };
-  }, [isOpen, student, credential, credentials, isPortfolio]);
+  }, [isOpen, student, credential, credentials, isPortfolio, useShort, shortCode]);
 
   useEffect(() => {
     if (!url) return;
-    QRCode.toDataURL(url, { width: 360, margin: 2, errorCorrectionLevel: 'L', color: { dark: '#0B1F33', light: '#FFFFFF' } })
+    // Short links get medium error correction: still sparse, and tolerant of glare on a phone screen.
+    QRCode.toDataURL(url, { width: 360, margin: 2, errorCorrectionLevel: useShort ? 'M' : 'L', color: { dark: '#0B1F33', light: '#FFFFFF' } })
       .then(setQrDataUrl)
       .catch(() => setQrDataUrl(''));
-  }, [url]);
+  }, [url, useShort]);
+
+  useEffect(() => {
+    if (!isOpen) setOfflineMode(false);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -68,14 +79,27 @@ export default function QRCodeModal({ isOpen, onClose, credential, student, cred
             </p>
           </div>
 
-          <div className="inline-block p-3 bg-white rounded-2xl shadow-sm border border-[#E0DFDC]">
+          {shortCode && (
+            <div role="tablist" aria-label="QR type" className="segmented mx-auto">
+              <button role="tab" aria-selected={!offlineMode} onClick={() => setOfflineMode(false)} className={!offlineMode ? 'is-active' : ''}>
+                <Zap className="w-3.5 h-3.5" /> Quick scan
+              </button>
+              <button role="tab" aria-selected={offlineMode} onClick={() => setOfflineMode(true)} className={offlineMode ? 'is-active' : ''}>
+                <WifiOff className="w-3.5 h-3.5" /> Offline QR
+              </button>
+            </div>
+          )}
+
+          <div className="inline-block p-3 bg-white rounded-2xl shadow-soft border border-[#E0DFDC]">
             {qrDataUrl ? <img src={qrDataUrl} alt="Verification QR code" className="w-60 h-60 sm:w-64 sm:h-64" /> : <div className="w-60 h-60 skeleton" />}
           </div>
 
           <div className="flex items-start gap-2 text-left p-3 rounded-xl bg-[#F4F2EE] dark:bg-[#0D1117] text-xs">
-            <WifiOff className="w-4 h-4 text-[#0A66C2] shrink-0 mt-px" />
+            {useShort ? <Zap className="w-4 h-4 text-[#0A66C2] shrink-0 mt-px" /> : <WifiOff className="w-4 h-4 text-[#0A66C2] shrink-0 mt-px" />}
             <span className="text-[#404040] dark:text-[#C9D1D9]">
-              {offlineCount > 0
+              {useShort
+                ? 'A short link that scans instantly, even from a distance. The recruiter’s device downloads your signed credentials and checks every signature and revocation status.'
+                : offlineCount > 0
                 ? `Contains ${offlineCount} signed credential${offlineCount === 1 ? '' : 's'} that can be verified offline${
                     isPortfolio && credentials.filter((c) => c.studentUserId === student?.id && c.state === 'Locked' && c.isPublic !== false).length > MAX_QR_CREDENTIALS
                       ? ` (your ${MAX_QR_CREDENTIALS} most recent)`

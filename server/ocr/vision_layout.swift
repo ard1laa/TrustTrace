@@ -45,15 +45,31 @@ func point(_ p: CGPoint) -> [Double] { [Double(p.x), Double(1 - p.y)] }
 guard CommandLine.arguments.count >= 2 else { fail("usage: vision_layout <file>") }
 guard let image = loadImage(CommandLine.arguments[1]) else { fail("cannot read image") }
 
-let request = VNRecognizeTextRequest()
-request.recognitionLevel = .accurate
-request.usesLanguageCorrection = false
-request.minimumTextHeight = 0.008
+func makeRequest(_ level: VNRequestTextRecognitionLevel) -> VNRecognizeTextRequest {
+  let request = VNRecognizeTextRequest()
+  request.recognitionLevel = level
+  request.usesLanguageCorrection = false
+  request.minimumTextHeight = 0.008
+  return request
+}
 
+// Some macOS releases ship a broken "accurate" model (e5rtError). Fall back to
+// the fast recogniser, which still gives line boxes and angles. The server
+// remembers the result and passes TT_VISION_LEVEL=fast to skip the slow failure.
+let preferFast = ProcessInfo.processInfo.environment["TT_VISION_LEVEL"] == "fast"
+var level = preferFast ? "fast" : "accurate"
+var request = makeRequest(preferFast ? .fast : .accurate)
 do {
   try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
 } catch {
-  fail("vision failed: \(error)")
+  if preferFast { fail("vision failed: \(error)") }
+  level = "fast"
+  request = makeRequest(.fast)
+  do {
+    try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+  } catch {
+    fail("vision failed: \(error)")
+  }
 }
 
 var lines: [[String: Any]] = []
@@ -74,6 +90,6 @@ for obs in request.results ?? [] {
   ])
 }
 
-let out: [String: Any] = ["width": image.width, "height": image.height, "lines": lines]
+let out: [String: Any] = ["width": image.width, "height": image.height, "level": level, "lines": lines]
 let data = try! JSONSerialization.data(withJSONObject: out, options: [])
 FileHandle.standardOutput.write(data)

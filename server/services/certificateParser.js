@@ -317,7 +317,11 @@ export function titleFromFilename(fileName = '') {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
-export function parseCertificate(lines, { fileName = '', hints = {} } = {}) {
+// OCR slips that break the patterns below: "1 st Place" → "1st Place".
+const cleanOcr = (text) => String(text || '').replace(/\b(\d{1,2})\s+(st|nd|rd|th)\b/gi, '$1$2');
+
+export function parseCertificate(rawLines, { fileName = '', hints = {} } = {}) {
+  const lines = rawLines.map((l) => ({ ...l, text: cleanOcr(l.text) }));
   const trigger = extractRecipientFromTrigger(lines);
   const issuer = (hints.issuer || extractIssuer(lines)).trim();
   const { title: layoutTitle, heading, headingType, candidates } = extractTitle(lines, { issuer, recipient: trigger?.name });

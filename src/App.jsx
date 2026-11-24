@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { CheckCircle2, X, WifiOff } from 'lucide-react';
+import { CheckCircle2, X, WifiOff, AlertTriangle } from 'lucide-react';
 import Navbar from './components/Navbar.jsx';
 import AuthScreen from './components/AuthScreen.jsx';
 import PublicVerifyPage from './components/PublicVerifyPage.jsx';
@@ -12,12 +12,13 @@ import QRCodeModal from './components/QRCodeModal.jsx';
 import TransferRevertModal from './components/TransferRevertModal.jsx';
 import CryptographicProofModal from './components/CryptographicProofModal.jsx';
 import ProfileSettingsModal from './components/ProfileSettingsModal.jsx';
-import { apiFetch, apiJson, setSession, clearSession, getSavedUser, getToken } from './lib/api.js';
+import { apiFetch, apiJson, setSession, endSession, getSavedUser, getToken } from './lib/api.js';
 import { saveSnapshot, loadSnapshot, clearSnapshots } from './lib/offlineStore.js';
 import { cacheIssuerDid } from './lib/verification.js';
 
 const ROLE_PATHS = { admin: '/admin', recruiter: '/recruiter', student: '/student' };
-const isVerifyRoute = () => window.location.pathname === '/verify' || /[#&]tt1=/.test(window.location.hash);
+const isVerifyRoute = () =>
+  window.location.pathname === '/verify' || /^\/v\/[0-9a-z]{8}\/?$/i.test(window.location.pathname) || /[#&]tt1=/.test(window.location.hash);
 
 function readTheme() {
   try {
@@ -60,10 +61,25 @@ export default function App() {
   });
   const [toast, setToast] = useState(null);
 
-  const showToast = useCallback((message) => {
-    setToast(message);
-    setTimeout(() => setToast((prev) => (prev === message ? null : prev)), 4000);
+  // options: { tone: 'info' | 'warn', sticky, action: { label, run } }
+  const showToast = useCallback((message, options = {}) => {
+    const next = { message, ...options, id: Date.now() + Math.random() };
+    setToast(next);
+    if (!options.sticky) setTimeout(() => setToast((prev) => (prev?.id === next.id ? null : prev)), options.duration || 4000);
   }, []);
+
+  // Service worker: offer the new version instead of reloading mid-task.
+  useEffect(() => {
+    const onUpdate = (e) => showToast('A new version of TrustTrace is ready.', { sticky: true, action: { label: 'Refresh', run: e.detail } });
+    // Only worth saying in the installed app; a recruiter opening a scanned link doesn't need it.
+    const onOfflineReady = () => window.matchMedia?.('(display-mode: standalone)').matches && showToast('TrustTrace is ready to work offline.');
+    window.addEventListener('trusttrace:update-ready', onUpdate);
+    window.addEventListener('trusttrace:offline-ready', onOfflineReady);
+    return () => {
+      window.removeEventListener('trusttrace:update-ready', onUpdate);
+      window.removeEventListener('trusttrace:offline-ready', onOfflineReady);
+    };
+  }, [showToast]);
 
   // Theme: light | dark | system
   useEffect(() => {
@@ -167,19 +183,19 @@ export default function App() {
   }, [fetchAllData]);
 
   const logout = useCallback(
-    (message = 'Signed out.') => {
-      clearSession();
+    (message = 'Signed out.', tone = 'info') => {
+      endSession();
       clearSnapshots();
       setCurrentUser(null);
       setAuthRoute('/login');
       setProfileModal((m) => ({ ...m, open: false }));
-      if (message) showToast(message);
+      if (message) showToast(message, { tone, duration: tone === 'warn' ? 6000 : 4000 });
     },
     [showToast]
   );
 
   useEffect(() => {
-    const onExpired = () => logout('Your session expired. Please sign in again.');
+    const onExpired = (e) => logout(e.detail?.message || 'Session expired. Please log in again.', 'warn');
     window.addEventListener('trusttrace:session-expired', onExpired);
     return () => window.removeEventListener('trusttrace:session-expired', onExpired);
   }, [logout]);
@@ -214,11 +230,32 @@ export default function App() {
   const handleApproveMint = (credId) => act(`/api/credentials/${credId}/approve-mint`, { method: 'POST', body: {} });
   const handleChangeState = (credId, state) => act(`/api/credentials/${credId}/state`, { method: 'PATCH', body: { state } });
 
-  const toastEl = toast && (
-    <div role="status" className="fixed top-[72px] inset-x-3 sm:inset-x-auto sm:right-4 z-[60] sm:max-w-sm linkedin-card p-3 border-l-4 border-l-[#0A66C2] shadow-lg flex items-center gap-2 animate-slide-up">
-      <CheckCircle2 className="w-4 h-4 text-[#0A66C2] dark:text-[#58A6FF] shrink-0" />
-      <span className="text-xs font-medium flex-1">{toast}</span>
-      <button onClick={() => setToast(null)} className="text-[#666666]" aria-label="Dismiss">
+  const toastData = typeof toast === 'string' ? { message: toast } : toast;
+  const warnToast = toastData?.tone === 'warn';
+  const toastEl = toastData && (
+    <div
+      key={toastData.id}
+      role={warnToast ? 'alert' : 'status'}
+      className={`toast fixed top-[72px] inset-x-3 sm:inset-x-auto sm:right-4 z-[60] sm:max-w-sm linkedin-card p-3 border-l-4 ${warnToast ? 'border-l-amber-500' : 'border-l-[#0A66C2]'} flex items-center gap-2.5 animate-slide-up`}
+    >
+      {warnToast ? (
+        <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+      ) : (
+        <CheckCircle2 className="w-4 h-4 text-[#0A66C2] dark:text-[#58A6FF] shrink-0" />
+      )}
+      <span className="text-xs font-medium flex-1">{toastData.message}</span>
+      {toastData.action && (
+        <button
+          onClick={() => {
+            toastData.action.run?.();
+            setToast(null);
+          }}
+          className="linkedin-btn-primary text-xs px-3 py-1"
+        >
+          {toastData.action.label}
+        </button>
+      )}
+      <button onClick={() => setToast(null)} className="p-1 rounded-full text-[#666666] hover:bg-black/5 dark:hover:bg-white/10 transition-colors" aria-label="Dismiss">
         <X className="w-4 h-4" />
       </button>
     </div>

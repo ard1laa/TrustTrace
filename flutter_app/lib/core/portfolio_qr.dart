@@ -53,6 +53,16 @@ Map<String, dynamic> buildPortfolioPayload(Map<String, dynamic> holder, List<Map
   };
 }
 
+/// Default QR: a short link (<origin>/v/<code>) — sparse and quick to scan.
+/// The scanner fetches the signed credentials and verifies them locally.
+String shareLink(String origin, String code) => '$origin/v/$code';
+
+String? extractShareCode(String text) {
+  final m = RegExp(r'(?:/v/|^trusttrace:v:)([0-9a-zA-Z]{8})(?:[/?#]|$)').firstMatch(text.trim());
+  return m?.group(1)?.toLowerCase();
+}
+
+/// Offline QR: the signed claims themselves, verifiable with no connection.
 String encodePortfolioUrl(Map<String, dynamic> payload, String origin) {
   final did = Uri.encodeComponent(payload['h']['d'].toString());
   return '$origin/verify?did=$did#tt1=${_b64url(utf8.encode(jsonEncode(payload)))}';

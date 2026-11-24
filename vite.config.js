@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { VitePWA } from 'vite-plugin-pwa';
 import fs from 'fs';
 import path from 'path';
 
@@ -21,8 +22,60 @@ function resolveOptionalHttps() {
 
 const pkg = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf-8'));
 
+// Installable PWA. Workbox precaches the built app shell (revisioned, so a
+// deploy replaces it cleanly) and the app opens instantly — or fully offline —
+// on patchy exhibition Wi-Fi. API data is never cached here; the dashboard
+// snapshot lives in IndexedDB (src/lib/offlineStore.js).
+const pwa = VitePWA({
+  registerType: 'prompt',
+  injectRegister: false,
+  includeAssets: ['favicon.png', 'apple-touch-icon.png', 'logo.png'],
+  manifest: {
+    id: '/',
+    name: 'TrustTrace — Verified Credentials',
+    short_name: 'TrustTrace',
+    description: 'Verifiable co-curricular credentials, skill maps and instant QR verification for students, universities and recruiters.',
+    start_url: '/?source=pwa',
+    scope: '/',
+    display: 'standalone',
+    display_override: ['standalone', 'minimal-ui'],
+    orientation: 'any',
+    background_color: '#F4F2EE',
+    theme_color: '#0A66C2',
+    categories: ['education', 'business', 'productivity'],
+    icons: [
+      { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+      { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+      { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+    ]
+  },
+  workbox: {
+    globPatterns: ['**/*.{js,css,html,png,svg,ico,woff2}'],
+    maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
+    navigateFallback: '/index.html',
+    navigateFallbackDenylist: [/^\/api\//],
+    cleanupOutdatedCaches: true,
+    runtimeCaching: [
+      {
+        urlPattern: ({ url }) => url.origin === 'https://fonts.googleapis.com',
+        handler: 'StaleWhileRevalidate',
+        options: { cacheName: 'google-fonts-css' }
+      },
+      {
+        urlPattern: ({ url }) => url.origin === 'https://fonts.gstatic.com',
+        handler: 'CacheFirst',
+        options: {
+          cacheName: 'google-fonts',
+          expiration: { maxEntries: 24, maxAgeSeconds: 365 * 24 * 60 * 60 },
+          cacheableResponse: { statuses: [0, 200] }
+        }
+      }
+    ]
+  }
+});
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), pwa],
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   server: {
     port: 5173,

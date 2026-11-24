@@ -3,9 +3,29 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    /* Soft, layered elevation: a hairline contact shadow plus a wide, faint ambient one. */
+    --tt-shadow-1: 0 1px 2px rgba(15, 23, 42, 0.04), 0 2px 8px -2px rgba(15, 23, 42, 0.05);
+    --tt-shadow-2: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px -8px rgba(15, 23, 42, 0.1);
+    --tt-shadow-3: 0 2px 4px rgba(15, 23, 42, 0.04), 0 20px 44px -16px rgba(15, 23, 42, 0.22);
+    --tt-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  .dark {
+    --tt-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --tt-shadow-2: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 24px -10px rgba(0, 0, 0, 0.55);
+    --tt-shadow-3: 0 2px 4px rgba(0, 0, 0, 0.4), 0 20px 44px -16px rgba(0, 0, 0, 0.7);
+  }
+
   html {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    /* Inter's open digits and single-storey a/l alternates read crisper at small sizes. */
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
     -webkit-tap-highlight-color: transparent;
+  }
+
+  h1, h2, h3 {
+    letter-spacing: -0.015em;
   }
 
   body {
@@ -29,11 +49,39 @@
 
 @layer components {
   .linkedin-card {
-    @apply bg-white dark:bg-[#1B1F23] border border-[#E0DFDC]/80 dark:border-[#30363D] rounded-2xl shadow-[0_1px_2px_rgba(0,0,0,0.04),0_4px_16px_-8px_rgba(0,0,0,0.08)] dark:shadow-[0_1px_2px_rgba(0,0,0,0.4)] transition-shadow duration-200;
+    @apply bg-white dark:bg-[#1B1F23] border border-[#E0DFDC]/70 dark:border-[#30363D] rounded-2xl transition-shadow duration-200;
+    box-shadow: var(--tt-shadow-1);
   }
 
   .linkedin-card-hover {
-    @apply hover:shadow-[0_2px_4px_rgba(0,0,0,0.05),0_12px_28px_-12px_rgba(0,0,0,0.18)] hover:-translate-y-px transition-all duration-200;
+    @apply hover:-translate-y-0.5 transition-all duration-200;
+    transition-timing-function: var(--tt-ease);
+  }
+
+  .linkedin-card-hover:hover {
+    box-shadow: var(--tt-shadow-2);
+  }
+
+  .shadow-soft {
+    box-shadow: var(--tt-shadow-2);
+  }
+
+  .toast {
+    box-shadow: var(--tt-shadow-3);
+  }
+
+  /* Two-option switch (e.g. Quick scan / Offline QR). */
+  .segmented {
+    @apply inline-flex p-1 gap-1 rounded-full bg-[#F4F2EE] dark:bg-[#0D1117] border border-[#E0DFDC]/70 dark:border-[#30363D];
+  }
+
+  .segmented > button {
+    @apply inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-semibold text-[#666666] dark:text-[#8B949E] transition-all duration-200 hover:text-[#191919] dark:hover:text-[#E6EDF3];
+  }
+
+  .segmented > button.is-active {
+    @apply bg-white dark:bg-[#1B1F23] text-[#0A66C2] dark:text-[#58A6FF];
+    box-shadow: var(--tt-shadow-1);
   }
 
   .modal-backdrop {
@@ -43,6 +91,7 @@
   .modal-panel {
     @apply linkedin-card w-full rounded-b-none sm:rounded-2xl max-h-[94vh] overflow-y-auto flex flex-col animate-slide-up sm:animate-scale-in;
     padding-bottom: env(safe-area-inset-bottom);
+    box-shadow: var(--tt-shadow-3);
   }
 
   .chip {
@@ -57,20 +106,50 @@
     @apply animate-pulse rounded-lg bg-black/5 dark:bg-white/5;
   }
 
+  /* Buttons: gentle lift on hover, a quick press-in, and a tap ripple (src/lib/ripple.js). */
   .linkedin-btn-primary {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full font-semibold text-sm bg-[#0A66C2] hover:bg-[#004182] text-white transition-all shadow-sm active:scale-[0.99] disabled:opacity-50;
+    @apply relative overflow-hidden isolate inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full font-semibold text-sm bg-[#0A66C2] hover:bg-[#004182] text-white transition-all duration-200 active:scale-[0.97] disabled:opacity-50 disabled:pointer-events-none;
+    box-shadow: 0 1px 2px rgba(10, 102, 194, 0.25);
+    transition-timing-function: var(--tt-ease);
+  }
+
+  .linkedin-btn-primary:hover {
+    box-shadow: 0 6px 16px -6px rgba(10, 102, 194, 0.55);
   }
 
   .linkedin-btn-outline {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-1.5 rounded-full font-semibold text-sm border border-[#0A66C2] text-[#0A66C2] dark:text-[#58A6FF] dark:border-[#58A6FF] hover:bg-[#EBF3FB] dark:hover:bg-[#0A66C2]/15 transition-all active:scale-[0.99];
+    @apply relative overflow-hidden isolate inline-flex items-center justify-center gap-2 px-4 py-1.5 rounded-full font-semibold text-sm border border-[#0A66C2] text-[#0A66C2] dark:text-[#58A6FF] dark:border-[#58A6FF] hover:bg-[#EBF3FB] dark:hover:bg-[#0A66C2]/15 transition-all duration-200 active:scale-[0.97] disabled:opacity-50 disabled:pointer-events-none;
   }
 
   .linkedin-btn-neutral {
-    @apply inline-flex items-center justify-center gap-2 px-3.5 py-1.5 rounded-full font-medium text-sm border border-[#666666]/40 dark:border-[#8B949E]/40 text-[#404040] dark:text-[#C9D1D9] hover:bg-black/5 dark:hover:bg-white/5 transition-all;
+    @apply relative overflow-hidden isolate inline-flex items-center justify-center gap-2 px-3.5 py-1.5 rounded-full font-medium text-sm border border-[#666666]/30 dark:border-[#8B949E]/35 text-[#404040] dark:text-[#C9D1D9] hover:bg-black/[0.04] hover:border-[#666666]/50 dark:hover:bg-white/5 transition-all duration-200 active:scale-[0.97] disabled:opacity-50 disabled:pointer-events-none;
+  }
+
+  .tt-ripple {
+    position: absolute;
+    border-radius: 9999px;
+    pointer-events: none;
+    z-index: -1;
+    background: currentColor;
+    opacity: 0.16;
+    transform: scale(0);
+    animation: tt-ripple 520ms var(--tt-ease) forwards;
+  }
+
+  .linkedin-btn-primary > .tt-ripple {
+    background: #fff;
+    opacity: 0.28;
+  }
+
+  @keyframes tt-ripple {
+    to {
+      transform: scale(1);
+      opacity: 0;
+    }
   }
 
   .linkedin-input {
-    @apply w-full px-3.5 py-2.5 sm:py-2 rounded-lg text-sm bg-white dark:bg-[#0D1117] border border-[#C0BFBC] dark:border-[#30363D] text-[#191919] dark:text-[#E6EDF3] focus:outline-none focus:ring-2 focus:ring-[#0A66C2] focus:border-transparent transition-all;
+    @apply w-full px-3.5 py-2.5 sm:py-2 rounded-lg text-sm bg-white dark:bg-[#0D1117] border border-[#C0BFBC] dark:border-[#30363D] text-[#191919] dark:text-[#E6EDF3] placeholder:text-[#8C8C8C] hover:border-[#8C8C8C] dark:hover:border-[#484F58] focus:outline-none focus:ring-[3px] focus:ring-[#0A66C2]/25 focus:border-[#0A66C2] dark:focus:border-[#58A6FF] transition-all duration-150;
   }
 }
 

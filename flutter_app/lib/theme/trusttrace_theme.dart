@@ -54,65 +54,140 @@ class TrustTraceTheme {
     return '${clean.substring(0, head)}...${clean.substring(clean.length - tail)}';
   }
 
-  static ThemeData get lightTheme {
-    return ThemeData(
-      useMaterial3: true,
-      brightness: Brightness.light,
-      scaffoldBackgroundColor: lightBg,
-      primaryColor: linkedInBlue,
-      colorScheme: const ColorScheme.light(
-        primary: linkedInBlue,
-        secondary: linkedInHover,
-        surface: lightCard,
-        onSurface: lightText,
-      ),
-      appBarTheme: const AppBarTheme(
-        backgroundColor: lightCard,
-        foregroundColor: lightText,
-        elevation: 0,
-        surfaceTintColor: Colors.transparent,
-      ),
-      cardTheme: CardThemeData(
-        color: lightCard,
-        elevation: 0,
-        margin: EdgeInsets.zero,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-          side: const BorderSide(color: lightBorder, width: 1),
-        ),
-      ),
-      dividerColor: lightBorder,
-    );
-  }
+  static ThemeData get lightTheme => _build(Brightness.light);
 
-  static ThemeData get darkTheme {
-    return ThemeData(
-      useMaterial3: true,
-      brightness: Brightness.dark,
-      scaffoldBackgroundColor: darkBg,
+  static ThemeData get darkTheme => _build(Brightness.dark);
+
+  /// One builder for both modes: soft layered elevation, stadium buttons with a
+  /// press ripple, crisp tightened headings and roomy, uncluttered inputs.
+  static ThemeData _build(Brightness brightness) {
+    final dark = brightness == Brightness.dark;
+    final bg = dark ? darkBg : lightBg;
+    final card = dark ? darkCard : lightCard;
+    final border = dark ? darkBorder : lightBorder;
+    final text = dark ? darkText : lightText;
+    final subtext = dark ? darkSubtext : lightSubtext;
+    final accent = dark ? const Color(0xFF58A6FF) : linkedInBlue;
+    final scheme = dark
+        ? ColorScheme.dark(primary: accent, secondary: linkedInBlue, surface: card, onSurface: text, outline: border, error: const Color(0xFFF85149))
+        : ColorScheme.light(primary: accent, secondary: linkedInHover, surface: card, onSurface: text, outline: border, error: dangerRed);
+
+    final base = ThemeData(useMaterial3: true, brightness: brightness, colorScheme: scheme);
+    final textTheme = base.textTheme.apply(bodyColor: text, displayColor: text).copyWith(
+          headlineSmall: base.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800, letterSpacing: -0.4, color: text),
+          titleLarge: base.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800, letterSpacing: -0.3, color: text),
+          titleMedium: base.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700, letterSpacing: -0.15, color: text),
+          bodySmall: base.textTheme.bodySmall?.copyWith(color: subtext),
+          labelLarge: base.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700, letterSpacing: 0),
+        );
+    const stadium = StadiumBorder();
+    final pressOverlay = WidgetStateProperty.resolveWith<Color?>((states) {
+      if (states.contains(WidgetState.pressed)) return accent.withValues(alpha: 0.14);
+      if (states.contains(WidgetState.hovered)) return accent.withValues(alpha: 0.06);
+      return null;
+    });
+
+    return base.copyWith(
+      scaffoldBackgroundColor: bg,
       primaryColor: linkedInBlue,
-      colorScheme: const ColorScheme.dark(
-        primary: Color(0xFF58A6FF),
-        secondary: linkedInBlue,
-        surface: darkCard,
-        onSurface: darkText,
-      ),
-      appBarTheme: const AppBarTheme(
-        backgroundColor: darkCard,
-        foregroundColor: darkText,
+      textTheme: textTheme,
+      dividerColor: border,
+      highlightColor: Colors.transparent,
+      splashFactory: InkRipple.splashFactory,
+      appBarTheme: AppBarTheme(
+        backgroundColor: card,
+        foregroundColor: text,
         elevation: 0,
+        scrolledUnderElevation: 0.5,
+        shadowColor: Colors.black.withValues(alpha: dark ? 0.5 : 0.08),
         surfaceTintColor: Colors.transparent,
+        titleTextStyle: textTheme.titleMedium,
       ),
       cardTheme: CardThemeData(
-        color: darkCard,
-        elevation: 0,
+        color: card,
+        elevation: 1,
+        shadowColor: Colors.black.withValues(alpha: dark ? 0.45 : 0.07),
+        surfaceTintColor: Colors.transparent,
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-          side: const BorderSide(color: darkBorder, width: 1),
+          borderRadius: BorderRadius.circular(14),
+          side: BorderSide(color: border.withValues(alpha: dark ? 1 : 0.75), width: 1),
         ),
       ),
-      dividerColor: darkBorder,
+      filledButtonTheme: FilledButtonThemeData(
+        style: ButtonStyle(
+          shape: const WidgetStatePropertyAll(stadium),
+          elevation: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.pressed) ? 0 : 0.5),
+          shadowColor: WidgetStatePropertyAll(linkedInBlue.withValues(alpha: 0.35)),
+          overlayColor: WidgetStatePropertyAll(Colors.white.withValues(alpha: 0.12)),
+          textStyle: WidgetStatePropertyAll(textTheme.labelLarge),
+          animationDuration: const Duration(milliseconds: 160),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: ButtonStyle(
+          shape: const WidgetStatePropertyAll(stadium),
+          side: WidgetStateProperty.resolveWith((s) => BorderSide(
+                color: s.contains(WidgetState.disabled) ? border : accent.withValues(alpha: 0.85),
+                width: 1.2,
+              )),
+          foregroundColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.disabled) ? subtext : accent),
+          overlayColor: pressOverlay,
+          textStyle: WidgetStatePropertyAll(textTheme.labelLarge),
+        ),
+      ),
+      textButtonTheme: TextButtonThemeData(
+        style: ButtonStyle(
+          shape: const WidgetStatePropertyAll(stadium),
+          overlayColor: pressOverlay,
+          textStyle: WidgetStatePropertyAll(textTheme.labelLarge),
+        ),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: dark ? bg : Colors.white,
+        hintStyle: TextStyle(color: subtext.withValues(alpha: 0.8)),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: border)),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: dark ? border : const Color(0xFFC0BFBC))),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: accent, width: 1.6)),
+      ),
+      snackBarTheme: SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+        elevation: 6,
+        backgroundColor: dark ? const Color(0xFF2D333B) : const Color(0xFF1F2328),
+        contentTextStyle: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13.5),
+        actionTextColor: const Color(0xFF79C0FF),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+      bottomSheetTheme: BottomSheetThemeData(
+        backgroundColor: card,
+        surfaceTintColor: Colors.transparent,
+        showDragHandle: true,
+        dragHandleColor: subtext.withValues(alpha: 0.35),
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      ),
+      dialogTheme: DialogThemeData(
+        backgroundColor: card,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      ),
+      navigationBarTheme: NavigationBarThemeData(
+        backgroundColor: card,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        indicatorColor: accent.withValues(alpha: dark ? 0.18 : 0.12),
+        labelTextStyle: WidgetStateProperty.resolveWith((s) => TextStyle(
+              fontSize: 11.5,
+              fontWeight: s.contains(WidgetState.selected) ? FontWeight.w800 : FontWeight.w600,
+              color: s.contains(WidgetState.selected) ? accent : subtext,
+            )),
+      ),
+      chipTheme: base.chipTheme.copyWith(
+        shape: const StadiumBorder(),
+        side: BorderSide(color: border),
+        backgroundColor: card,
+      ),
+      progressIndicatorTheme: ProgressIndicatorThemeData(color: accent),
     );
   }
 }

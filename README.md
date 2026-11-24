@@ -48,9 +48,28 @@ Signing in with an address listed in `DEVELOPER_EMAILS` unlocks the same panel w
 npm run build && npm start    # serves the built app and API on :3001
 ```
 
-Open the app once while online. The service worker then caches the app, and IndexedDB keeps the
-last dashboard data and the registrar's public key, so the portal opens and QR codes verify
-if the Wi-Fi drops.
+The web app is an installable PWA (`vite-plugin-pwa` + Workbox): use the browser's *Install* /
+*Add to Home Screen*. Open it once while online. Workbox then precaches the app shell, and IndexedDB
+keeps the last dashboard data and the registrar's public key. The portal opens instantly on patchy
+Wi-Fi, and Offline QR codes verify with no connection. After a deploy, users get a "New version ·
+Refresh" prompt instead of a reload mid-task.
+
+### Sessions
+
+Sign-in returns a 2-hour access token and a 30-day rotating refresh token (`ACCESS_TOKEN_TTL_MINUTES`,
+`REFRESH_TOKEN_TTL_DAYS`). Web (`src/lib/api.js`) and mobile (`ApiService`) refresh shortly before
+expiry and after any `401 SESSION_EXPIRED`, then retry the request once. If the session can't be
+renewed, the app returns to sign-in with "Session expired. Please log in again." Signing out ends the
+session on the server. Changing your password signs out your other devices.
+
+### QR codes
+
+QR codes carry only a short link, `https://<host>/v/<code>` (e.g. `/v/4mrb9md7`). That gives a
+sparse 29×29 code that scans from a distance. The scanner resolves the code through `/api/verify`,
+downloads the signed credentials, and checks each ECDSA signature locally against the issuer DID.
+Codes are derived from record IDs (`server/services/shareLinks.js`), so they survive restarts and
+need no migration. The share sheet also offers an **Offline QR**, which embeds the signed claims for
+recruiters with no connection. Older QR codes still scan.
 
 ## Database
 
@@ -98,12 +117,12 @@ of truth. After editing either, run `npm run gen:taxonomy` to regenerate the Dar
 
 | Gate | Checks |
 | --- | --- |
-| 1 Layout | 3D desk/table renders (flat scans and PDFs pass) |
+| 1 Layout | Certificate shown in a 3D scene: rotated sheet whose text rotates with it, or perspective (server-side, `sceneDetector.js`) |
 | 2 Recipient | Fuzzy match of the printed name against the account |
 | 3 AI template | Known AI-generated template content |
 | 4 Issuer & event | Online cross-check: Wikipedia + DNS (no key), plus Brave/Google search if configured |
 | 5 Metadata | AI image-generator signatures |
-| 6 Tamper forensics | Edited names: multi-quality error level analysis (JPEG ghosts), sensor-noise mismatch, alignment/skew, in-sentence font metrics; PDFs: editor tools, incremental edits, overlaid text boxes |
+| 6 Tamper forensics | Edited names: multi-quality error level analysis (JPEG ghosts), sensor-noise mismatch, pasted background patch, alignment/skew, in-sentence font size/baseline; PDFs: editor tools, incremental edits, overlaid text boxes |
 
 Strong evidence rejects the certificate; moderate evidence sends it to a registrar ("Needs review").
 The scanner also auto-fills the form: title (largest/centred text + event keywords), issuer, date,
@@ -112,5 +131,12 @@ type (Competition / Hackathon / Workshop / Seminar) and result ("1st Place", "CG
 - Text positions come from Google Cloud Vision (`GOOGLE_VISION_API_KEY`), the macOS Vision helper
   (`server/ocr/vision_layout`, rebuild with `npm run build:ocr`), or Gemini. Without any of them the
   name-region forensics are skipped and file-level checks still run.
-- Gate 1 flags only clearly skewed "certificate on a desk" scenes. Flat scans, PDFs and bordered
-  designs pass.
+- Gate 1 separates layout from graphic design. The paper region must be a clean quadrilateral with
+  background on 3+ sides, and a rotated sheet must have its text rotated by the same angle. Ribbons,
+  swooshes, coloured frames and decorative tilted panels behind level text all pass. Perspective
+  with no other evidence goes to registrar review rather than being rejected.
+- The name is located by text, then fuzzy match, then the slot after "certify that" /
+  "presented to". Script-font names that OCR can't read are still analysed.
+- Some macOS releases ship a broken *accurate* Vision model (`e5rtError`). The helper detects this,
+  falls back to the *fast* recogniser and logs a warning. Fast OCR misreads more decorative text
+  (e.g. "IEEE" → "E"), so set `GOOGLE_VISION_API_KEY` for best auto-fill quality.

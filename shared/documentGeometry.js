@@ -11,7 +11,7 @@ export const GEOMETRY_VERSION = 2;
 const MAX_SKEW = 0.08; // ~4.6° edge tilt
 const MIN_MARGIN = 0.03; // background strip, as a fraction of the frame
 
-function isPaper(r, g, b) {
+export function isPaper(r, g, b) {
   const max = Math.max(r, g, b);
   const min = Math.min(r, g, b);
   const lum = 0.299 * r + 0.587 * g + 0.114 * b;

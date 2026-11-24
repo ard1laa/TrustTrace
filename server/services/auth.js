@@ -1,7 +1,14 @@
 import crypto from 'crypto';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'trusttrace-dev-secret-change-me';
-const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Short-lived access tokens, renewed silently with a rotating refresh token.
+export const ACCESS_TOKEN_TTL_SECONDS = Math.max(60, Number(process.env.ACCESS_TOKEN_TTL_MINUTES || 120) * 60);
+const REFRESH_IDLE_DAYS = Math.max(1, Number(process.env.REFRESH_TOKEN_TTL_DAYS || 30));
+const REFRESH_MAX_DAYS = 180;
+const MAX_SESSIONS = 10;
+// A rotated refresh token stays usable briefly so two tabs refreshing at once don't sign each other out.
+const ROTATION_GRACE_MS = 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 if (!process.env.JWT_SECRET && process.env.NODE_ENV === 'production') {
   console.warn('[auth] JWT_SECRET is not set; using an insecure development secret.');
@@ -35,7 +42,7 @@ export function verifyPassword(password, stored) {
 // ---------------------------------------------------------------------------
 // HS256 JWT
 // ---------------------------------------------------------------------------
-export function signJwt(payload, ttlSeconds = Math.floor(TOKEN_TTL_MS / 1000)) {
+export function signJwt(payload, ttlSeconds = ACCESS_TOKEN_TTL_SECONDS) {
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
   const now = Math.floor(Date.now() / 1000);
   const body = Buffer.from(JSON.stringify({ ...payload, iat: now, exp: now + ttlSeconds })).toString('base64url');
@@ -63,6 +70,83 @@ export function verifyJwt(token) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Sessions. Each sign-in creates a session on the user record holding hashed
+// refresh tokens. Refreshing rotates the token; signing out or changing the
+// password removes sessions, which also invalidates their access tokens.
+// Refresh token format: rt1.<base64url(userId)>.<sessionId>.<secret>
+// ---------------------------------------------------------------------------
+const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
+
+function pruneSessions(user, now = Date.now()) {
+  user.sessions = (user.sessions || [])
+    .map((s) => ({ ...s, tokens: (s.tokens || []).filter((t) => t.expiresAt > now) }))
+    .filter((s) => s.tokens.length && s.expiresAt > now && s.absoluteExpiresAt > now);
+}
+
+function addToken(session, now) {
+  const secret = crypto.randomBytes(32).toString('base64url');
+  session.tokens.push({ hash: sha256(secret), expiresAt: now + REFRESH_IDLE_DAYS * DAY_MS });
+  session.tokens = session.tokens.slice(-4);
+  session.expiresAt = now + REFRESH_IDLE_DAYS * DAY_MS;
+  session.lastUsedAt = new Date(now).toISOString();
+  return secret;
+}
+
+function issueTokens(user, session, secret) {
+  return {
+    token: signJwt({ id: user.id, role: user.role, sid: session.id }),
+    refreshToken: `rt1.${Buffer.from(user.id).toString('base64url')}.${session.id}.${secret}`,
+    expiresIn: ACCESS_TOKEN_TTL_SECONDS
+  };
+}
+
+export function createSession(user, { device = '' } = {}) {
+  const now = Date.now();
+  pruneSessions(user, now);
+  const session = {
+    id: crypto.randomBytes(9).toString('base64url'),
+    device: String(device).slice(0, 120),
+    createdAt: new Date(now).toISOString(),
+    absoluteExpiresAt: now + REFRESH_MAX_DAYS * DAY_MS,
+    tokens: []
+  };
+  const secret = addToken(session, now);
+  user.sessions = [...user.sessions, session].slice(-MAX_SESSIONS);
+  return issueTokens(user, session, secret);
+}
+
+export function parseRefreshToken(raw) {
+  const parts = String(raw || '').split('.');
+  if (parts.length !== 4 || parts[0] !== 'rt1') return null;
+  try {
+    return { userId: Buffer.from(parts[1], 'base64url').toString('utf-8'), sessionId: parts[2], secret: parts[3] };
+  } catch {
+    return null;
+  }
+}
+
+// Returns fresh tokens, or null when the refresh token is unknown, expired or revoked.
+export function rotateSession(user, parsed) {
+  const now = Date.now();
+  pruneSessions(user, now);
+  const session = user.sessions.find((s) => s.id === parsed.sessionId);
+  const hash = sha256(parsed.secret);
+  const presented = session?.tokens.find((t) => t.hash.length === hash.length && crypto.timingSafeEqual(Buffer.from(t.hash), Buffer.from(hash)));
+  if (!presented) return null;
+  presented.expiresAt = Math.min(presented.expiresAt, now + ROTATION_GRACE_MS);
+  const secret = addToken(session, now);
+  return issueTokens(user, session, secret);
+}
+
+export function revokeSession(user, sessionId) {
+  user.sessions = (user.sessions || []).filter((s) => s.id !== sessionId);
+}
+
+export function revokeOtherSessions(user, keepSessionId) {
+  user.sessions = (user.sessions || []).filter((s) => s.id === keepSessionId);
+}
+
 // Express middleware factory. `getUser(id)` resolves the live user record so
 // deleted accounts and role changes take effect immediately.
 export function createAuthMiddleware(getUser) {
@@ -71,7 +155,11 @@ export function createAuthMiddleware(getUser) {
     const token = header.startsWith('Bearer ') ? header.slice(7) : req.query.access_token;
     const payload = verifyJwt(token);
     if (!payload?.id) return null;
-    return getUser(payload.id) || null;
+    const user = getUser(payload.id) || null;
+    // Tokens tied to a session die with it (sign-out, password change).
+    if (user && payload.sid && !(user.sessions || []).some((s) => s.id === payload.sid)) return null;
+    if (user) req.sessionId = payload.sid || null;
+    return user;
   };
 
   const optionalAuth = (req, _res, next) => {
@@ -79,9 +167,13 @@ export function createAuthMiddleware(getUser) {
     next();
   };
 
+  // Clients look for code SESSION_EXPIRED to refresh silently or sign out.
   const requireAuth = (req, res, next) => {
     const user = resolve(req);
-    if (!user) return res.status(401).json({ error: 'Please sign in again.' });
+    if (!user) {
+      res.set('WWW-Authenticate', 'Bearer error="invalid_token"');
+      return res.status(401).json({ error: 'Your session expired. Please sign in again.', code: 'SESSION_EXPIRED' });
+    }
     req.user = user;
     next();
   };

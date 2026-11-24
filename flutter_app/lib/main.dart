@@ -88,7 +88,7 @@ class _TrustTraceAppState extends State<TrustTraceApp> with WidgetsBindingObserv
 
   void _onSessionExpired() {
     if (_user == null) return;
-    _signOut(message: 'Your session expired. Please sign in again.');
+    _signOut(message: 'Session expired. Please log in again.');
   }
 
   Future<void> _signOut({String? message}) async {

@@ -14,6 +14,7 @@
 //
 // PDFs are checked structurally instead: incremental edits and editor tools.
 import sharp from 'sharp';
+import { compareNames, findNameInText, nameTokens, similarity } from './nameMatch.js';
 
 const EDITOR_SOFTWARE = /photoshop|gimp|pixelmator|affinity\s+photo|picsart|snapseed|lightroom|photopea|fotor|polarr|paint\.net|krita|inpaint|remove\.bg|facetune|pixlr/i;
 const PDF_EDITORS = /pdfescape|sejda|ilovepdf|smallpdf|pdf-?xchange|foxit\s+(?:phantom|editor)|pdfelement|wondershare|pdffiller|docfly|xodo|nitro|pdf\s*candy|pdf24|online\s*pdf\s*editor|soda\s*pdf|able2extract|pdf\s*buddy|dochub/i;
@@ -133,6 +134,123 @@ function signal(id, severity, label, detail, value) {
 }
 
 // ---------------------------------------------------------------------------
+// Locating the name. Decorative script names are where OCR is weakest, and
+// exactly where a forger pastes, so three strategies are tried in turn:
+//   1. text   — a line that reads as the expected name
+//   2. fuzzy  — the line most similar to it (OCR slips like "Hafv BinAIi")
+//   3. slot   — the line or gap right after "certify that" / "presented to"
+// ---------------------------------------------------------------------------
+const NAME_CUE = /(certif(?:y|ies)\s+that|presented\s+to|awarded\s+to|conferred\s+(?:up)?on|granted\s+to|is\s+hereby\s+(?:awarded|given)\s+to|this\s+is\s+to\s+(?:certify|acknowledge)|recogni[sz]es?)\s*[:.,]?\s*$/i;
+const SENTENCE_WORDS = /\b(has|have|for|in|of|the|on|at|with|by|from|participat|complet|organi[sz]ed|held)\w*/i;
+
+export function locateNameRegion(layout, candidates = []) {
+  const lines = (layout?.lines || []).filter((l) => l.box).sort((a, b) => a.box.y - b.box.y);
+  if (!lines.length) return null;
+  const names = [...new Set(candidates.filter(Boolean))];
+
+  for (const name of names) {
+    const line = lines.find((l) => findNameInText(l.text, name).found || compareNames(l.text, name).matched);
+    if (line) return Object.assign(line, { nameTokens: nameTokens(name), locatedBy: 'text' });
+  }
+
+  let fuzzy = null;
+  for (const name of names) {
+    const target = nameTokens(name).join('');
+    for (const l of lines) {
+      const tokens = nameTokens(l.text);
+      if (tokens.length < 1 || tokens.length > 7) continue;
+      const score = similarity(tokens.join(''), target);
+      if (score >= 0.72 && (!fuzzy || score > fuzzy.score)) fuzzy = { line: l, score, name };
+    }
+  }
+  if (fuzzy) return Object.assign(fuzzy.line, { nameTokens: nameTokens(fuzzy.name), locatedBy: 'fuzzy' });
+
+  const cueIndex = lines.findIndex((l) => NAME_CUE.test(l.text.trim()));
+  const cue = lines[cueIndex];
+  const next = lines[cueIndex + 1];
+  if (!cue || !next) return null;
+  const nextIsName = nameTokens(next.text).length >= 1 && nameTokens(next.text).length <= 6 && !SENTENCE_WORDS.test(next.text);
+  if (nextIsName) return Object.assign(next, { nameTokens: names[0] ? nameTokens(names[0]) : nameTokens(next.text), locatedBy: 'slot' });
+
+  // Nothing legible between the cue and the next sentence: the name is there, unread.
+  const top = cue.box.y + cue.box.h;
+  const gap = next.box.y - top;
+  const lineH = Math.max(cue.box.h, next.box.h);
+  if (gap < lineH * 1.2) return null;
+  const width = Math.min(0.9, Math.max(cue.box.w, next.box.w) * 1.05);
+  const axis = (cue.box.x + cue.box.w / 2 + next.box.x + next.box.w / 2) / 2;
+  return {
+    text: '',
+    words: [],
+    angle: ((cue.angle || 0) + (next.angle || 0)) / 2,
+    confidence: 0,
+    nameTokens: names[0] ? nameTokens(names[0]) : [],
+    locatedBy: 'gap',
+    box: { x: Math.max(0, axis - width / 2), y: top + gap * 0.1, w: width, h: gap * 0.8 }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Background patch: a pasted name usually sits on a rectangle filled to match
+// the paper. Its top and bottom edges are long, straight, low-contrast steps
+// hugging the name. Designed banners are high-contrast and wider, and if the
+// other text lines sit on panels too, it's the design.
+// ---------------------------------------------------------------------------
+function rowMeans(r, y, x0, x1) {
+  const out = new Float32Array(x1 - x0);
+  for (let x = x0; x < x1; x++) out[x - x0] = r.lum[y * r.width + x];
+  return out;
+}
+
+function bandStats(r, y0, y1, x0, x1) {
+  const n = x1 - x0;
+  const cols = new Float32Array(n);
+  for (let y = y0; y < y1; y++) {
+    const row = rowMeans(r, y, x0, x1);
+    for (let i = 0; i < n; i++) cols[i] += row[i] / (y1 - y0);
+  }
+  const mean = cols.reduce((s, v) => s + v, 0) / n;
+  const sd = Math.sqrt(cols.reduce((s, v) => s + (v - mean) ** 2, 0) / n);
+  return { cols, mean, sd };
+}
+
+// Strongest straight step (inside minus outside) above or below a text box.
+function patchEdge(r, rect, side) {
+  const h = rect.y1 - rect.y0;
+  const inset = Math.round((rect.x1 - rect.x0) * 0.08);
+  const x0 = rect.x0 + inset;
+  const x1 = rect.x1 - inset;
+  if (x1 - x0 < 40 || h < 8) return null;
+  let best = null;
+  for (let d = 2; d <= Math.round(h * 1.1); d++) {
+    const y = side === 'top' ? rect.y0 - d : rect.y1 + d;
+    if (y - 6 < 0 || y + 7 > r.height) continue;
+    const before = bandStats(r, y - 5, y - 1, x0, x1);
+    const after = bandStats(r, y + 2, y + 6, x0, x1);
+    if (before.sd > 5 || after.sd > 5) continue; // text or texture, not a flat edge
+    let agree = 0;
+    const step = after.mean - before.mean;
+    for (let i = 0; i < before.cols.length; i++) {
+      const diff = after.cols[i] - before.cols[i];
+      if (Math.sign(diff) === Math.sign(step) && Math.abs(diff) >= 1) agree++;
+    }
+    const consistency = agree / before.cols.length;
+    if (Math.abs(step) >= 1.5 && consistency >= 0.8 && (!best || Math.abs(step) > Math.abs(best.step))) {
+      // inside − outside: below the top edge is inside; above the bottom edge is inside.
+      best = { step, inside: side === 'top' ? step : -step, distance: d / h };
+    }
+  }
+  return best;
+}
+
+function patchAround(r, rect) {
+  const top = patchEdge(r, rect, 'top');
+  const bottom = patchEdge(r, rect, 'bottom');
+  if (!top || !bottom || Math.sign(top.inside) !== Math.sign(bottom.inside)) return null;
+  return { contrast: (Math.abs(top.inside) + Math.abs(bottom.inside)) / 2, tight: Math.max(top.distance, bottom.distance) };
+}
+
+// ---------------------------------------------------------------------------
 // Raster documents
 // ---------------------------------------------------------------------------
 async function analyzeRaster({ buffer, mimeType, layout, nameLine, metadataText }) {
@@ -193,6 +311,22 @@ async function analyzeRaster({ buffer, mimeType, layout, nameLine, metadataText 
       if (nr < 0.3) signals.push(signal('noise', 'strong', 'Name is missing camera noise', 'The background behind the name is perfectly clean while the rest of the photo has sensor noise — typical of pasted text.', nr));
       else if (nr < 0.5) signals.push(signal('noise', 'moderate', 'Lower noise behind the name', 'The area behind the name is smoother than the rest of the photo.', nr));
     }
+
+    // 3. Background patch hugging the name, absent behind the other lines.
+    const namePatch = patchAround(raster, rectOf(nameLine.box, raster, 0, 0));
+    const peerPatches = peers.filter((l) => patchAround(raster, rectOf(l.box, raster, 0, 0))).length;
+    metrics.patch = namePatch ? { contrast: fmt(namePatch.contrast, 1), tight: fmt(namePatch.tight), peersWithPanels: peerPatches } : null;
+    if (namePatch && namePatch.contrast <= 24 && peerPatches <= 1) {
+      signals.push(
+        signal(
+          'patch',
+          namePatch.contrast <= 10 ? 'moderate' : 'weak',
+          'Name sits on a pasted background',
+          `A faint rectangle (${namePatch.contrast.toFixed(0)} grey levels from the paper) surrounds the name but no other text — typical of a cover-up patch.`,
+          namePatch.contrast
+        )
+      );
+    }
   } else {
     metrics.note = 'Not enough comparable text lines for region analysis.';
   }
@@ -239,6 +373,7 @@ async function analyzeRaster({ buffer, mimeType, layout, nameLine, metadataText 
     }
   }
 
+  metrics.nameLocatedBy = nameLine.locatedBy || 'text';
   return { applicable: true, signals, metrics };
 }
 

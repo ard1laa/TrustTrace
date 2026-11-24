@@ -33,13 +33,18 @@ import { runLiveSystemBenchmark } from './services/benchmarkEngine.js';
 import {
   hashPassword,
   verifyPassword,
-  signJwt,
   createAuthMiddleware,
+  createSession,
+  parseRefreshToken,
+  rotateSession,
+  revokeSession,
+  revokeOtherSessions,
   publicProviderConfig,
   verifyGoogleIdToken,
   verifyAppleIdToken
 } from './services/auth.js';
 import { sseHandler, currentRevision } from './services/events.js';
+import { shareCodeFor, parseShareCode, resolveShareCode } from './services/shareLinks.js';
 import { resolveField, isKnownFieldId, publicTaxonomy } from '../shared/skillTaxonomy.js';
 
 const app = express();
@@ -68,7 +73,7 @@ app.use('/api', async (_req, _res, next) => {
 // ---------------------------------------------------------------------------
 const SECRET_FIELDS = [
   'passwordHash', 'privateKeyHex', 'seedPhrase', 'verificationCode', 'authProviders', 'pendingClaim',
-  'verificationProof', 'verificationNote', 'verificationReviewedBy'
+  'verificationProof', 'verificationNote', 'verificationReviewedBy', 'sessions'
 ];
 
 function publicUser(u) {
@@ -98,8 +103,11 @@ function selfUser(u) {
   };
 }
 
-function authResponse(user, message) {
-  const response = { token: signJwt({ id: user.id, role: user.role }), user: selfUser(user), message };
+// Every sign-in opens a session: a 2-hour access token plus a rotating refresh token.
+function authResponse(user, message, req) {
+  const tokens = createSession(user, { device: req?.get?.('user-agent') || '' });
+  db.save(['users'], { notify: false });
+  const response = { ...tokens, user: selfUser(user), message };
   if (isDeveloperEmail(user.email)) response.developerToken = issueDeveloperToken(user.email);
   return response;
 }
@@ -191,7 +199,7 @@ app.post('/api/auth/login', optionalAuth, (req, res) => {
     user.passwordHash = hashPassword(req.body.password);
     db.save(['users']);
   }
-  res.json(authResponse(user, `Welcome back, ${user.name}.`));
+  res.json(authResponse(user, `Welcome back, ${user.name}.`, req));
 });
 
 // ---------------------------------------------------------------------------
@@ -232,7 +240,7 @@ app.post('/api/auth/demo-login', optionalAuth, (req, res) => {
     ? db.state.users.find((u) => u.isDemo && u.id === req.body.userId)
     : db.state.users.find((u) => u.isDemo && u.role === (req.body.role === 'admin' ? 'admin' : 'recruiter'));
   if (!user) return res.status(404).json({ error: 'That demo account does not exist.' });
-  res.json(authResponse(user, `Signed in as ${user.name} (demo ${user.role === 'admin' ? 'registrar' : user.role}).`));
+  res.json(authResponse(user, `Signed in as ${user.name} (demo ${user.role === 'admin' ? 'registrar' : user.role}).`, req));
 });
 
 function buildNewUser(body, { role, email, name }) {
@@ -320,14 +328,15 @@ app.post('/api/auth/register', (req, res) => {
     delete existing.pendingClaim;
     existing.headline = headlineFor(existing);
     db.save(['users']);
-    return res.json(authResponse(existing, 'Account created — credentials issued to this email are already in your wallet.'));
+    return res.json(authResponse(existing, 'Account created — credentials issued to this email are already in your wallet.', req));
   }
 
   const user = buildNewUser(req.body, { role, email, name });
   user.passwordHash = hashPassword(password);
+  user.shareCode = shareCodeFor(user.id);
   db.state.users.unshift(user);
   db.save(['users']);
-  res.json(authResponse(user, welcomeMessage(user)));
+  res.json(authResponse(user, welcomeMessage(user), req));
 });
 
 async function handleOAuth(req, res, verify) {
@@ -343,7 +352,7 @@ async function handleOAuth(req, res, verify) {
       if (user.pendingClaim) delete user.pendingClaim;
       if (!user.avatarUrl && identity.picture) user.avatarUrl = identity.picture;
       db.save(['users']);
-      return res.json(authResponse(user, `Signed in with ${identity.provider === 'google' ? 'Google' : 'Apple'}.`));
+      return res.json(authResponse(user, `Signed in with ${identity.provider === 'google' ? 'Google' : 'Apple'}.`, req));
     }
 
     // New account: the client supplies role and onboarding fields alongside the token.
@@ -356,9 +365,10 @@ async function handleOAuth(req, res, verify) {
     user = buildNewUser(req.body, { role, email: identity.email.toLowerCase(), name });
     user.authProviders = [{ provider: identity.provider, subject: identity.subject, linkedAt: new Date().toISOString() }];
     user.avatarUrl = identity.picture || '';
-    db.state.users.unshift(user);
+    user.shareCode = shareCodeFor(user.id);
+  db.state.users.unshift(user);
     db.save(['users']);
-    res.json(authResponse(user, welcomeMessage(user)));
+    res.json(authResponse(user, welcomeMessage(user), req));
   } catch (err) {
     res.status(401).json({ error: err.message || 'Sign-in failed.' });
   }
@@ -374,6 +384,32 @@ app.post('/api/auth/oauth/apple/callback', (req, res) => {
 });
 
 app.get('/api/auth/me', requireAuth, (req, res) => res.json({ user: selfUser(req.user) }));
+
+// Swaps a refresh token for a new access token (and a rotated refresh token).
+app.post('/api/auth/refresh', (req, res) => {
+  const parsed = parseRefreshToken(req.body?.refreshToken);
+  const user = parsed && db.findUserById(parsed.userId);
+  const tokens = user && rotateSession(user, parsed);
+  if (!tokens) return res.status(401).json({ error: 'Your session expired. Please sign in again.', code: 'SESSION_EXPIRED' });
+  if (user.isDemo && !demoAllowed(req)) {
+    revokeSession(user, parsed.sessionId);
+    db.save(['users'], { notify: false });
+    return res.status(401).json({ error: 'Demo sessions have ended.', code: 'SESSION_EXPIRED' });
+  }
+  db.save(['users'], { notify: false });
+  res.json({ ...tokens, user: selfUser(user) });
+});
+
+app.post('/api/auth/logout', optionalAuth, (req, res) => {
+  const parsed = parseRefreshToken(req.body?.refreshToken);
+  const user = req.user || (parsed && db.findUserById(parsed.userId));
+  const sessionId = parsed?.sessionId || req.sessionId;
+  if (user && sessionId && (!parsed || parsed.userId === user.id)) {
+    revokeSession(user, sessionId);
+    db.save(['users'], { notify: false });
+  }
+  res.json({ ok: true });
+});
 
 // Pending (or declined) staff can add or replace their proof document.
 app.post('/api/auth/verification-proof', requireAuth, (req, res) => {
@@ -447,8 +483,10 @@ app.put('/api/auth/password', requireAuth, (req, res) => {
     return res.status(401).json({ error: 'Current password is incorrect.' });
   }
   req.user.passwordHash = hashPassword(newPassword);
+  // Other devices must sign in again with the new password.
+  if (hadPassword) revokeOtherSessions(req.user, req.sessionId);
   db.save(['users']);
-  res.json({ ok: true, message: hadPassword ? 'Password updated.' : 'Password set. You can now also sign in with your email.' });
+  res.json({ ok: true, message: hadPassword ? 'Password updated. Other devices have been signed out.' : 'Password set. You can now also sign in with your email.' });
 });
 
 app.delete('/api/auth/account/:userId', requireSelfOr('userId', 'admin'), (req, res) => {
@@ -485,13 +523,22 @@ app.post('/api/wallet/recover', (req, res) => {
     (u) => (u.seedPhrase && u.seedPhrase.toLowerCase() === input) || (u.privateKeyHex && u.privateKeyHex.toLowerCase() === input)
   );
   if (!user) return res.status(404).json({ error: 'No wallet matches that recovery phrase or key.' });
-  res.json({ recovered: true, ...authResponse(user, `Wallet recovered for ${user.name}.`) });
+  res.json({ recovered: true, ...authResponse(user, `Wallet recovered for ${user.name}.`, req) });
 });
 
 // ---------------------------------------------------------------------------
 // Users, talent search, shortlists
 // ---------------------------------------------------------------------------
-app.get('/api/users', optionalAuth, (req, res) => {
+// A request that sent a token we can't accept must hear about it, so the
+// client can refresh rather than quietly continue as a signed-out visitor.
+const rejectStaleToken = (req, res, next) => {
+  if (!req.user && (req.headers.authorization || '').startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Your session expired. Please sign in again.', code: 'SESSION_EXPIRED' });
+  }
+  next();
+};
+
+app.get('/api/users', optionalAuth, rejectStaleToken, (req, res) => {
   // Accounts awaiting verification browse like a signed-out visitor.
   const viewer = req.user && isActive(req.user) ? req.user : null;
   const isAdmin = viewer?.role === 'admin';
@@ -708,6 +755,7 @@ function resolveIssuanceStudent(req) {
         createdAt: new Date().toISOString()
       };
       student.headline = headlineFor(student);
+      student.shareCode = shareCodeFor(student.id);
       db.state.users.unshift(student);
     }
   }
@@ -814,6 +862,7 @@ app.post('/api/credentials/issue', requireRole('student', 'admin'), (req, res) =
     createdAt: new Date().toISOString()
   };
 
+  credential.shareCode = shareCodeFor(credential.id);
   db.state.credentials.unshift(credential);
   if (scanId) recentScans.delete(scanId);
   db.save(['credentials']);
@@ -971,7 +1020,23 @@ app.post('/api/verify', (req, res) => {
 
   let cred = null;
   let candidate = null;
-  if (query) {
+  // Short QR links (/v/<code>) resolve to a student's portfolio or one credential.
+  const shared = resolveShareCode(db.state, parseShareCode(credentialId || candidateLookup));
+  if (shared) {
+    if (shared.kind === 'credential' && !visible(shared.credential)) {
+      return res.status(404).json({ error: 'This credential is private or no longer shared.' });
+    }
+    if (shared.kind === 'portfolio' && (shared.user.role !== 'student' || shared.user.pendingClaim)) {
+      return res.status(404).json({ error: 'This link does not point to a student portfolio.' });
+    }
+  }
+  if (shared?.kind === 'credential') {
+    cred = shared.credential;
+  } else if (shared?.kind === 'portfolio') {
+    candidate = shared.user;
+    const owned = db.state.credentials.filter((c) => c.studentUserId === candidate.id && visible(c));
+    cred = owned.find((c) => c.state === 'Locked') || owned[0] || null;
+  } else if (query) {
     cred = db.state.credentials.find(
       (c) => c.id.toLowerCase() === qLower || String(c.tokenId) === query || c.ipfsCid?.toLowerCase() === qLower || c.credentialHash?.toLowerCase() === qLower
     );

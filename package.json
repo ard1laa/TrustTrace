@@ -1,6 +1,6 @@
 {
   "name": "trusttrace-web3-credentials",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "TrustTrace: blockchain-anchored micro-credentials with skill visualizations.",
   "type": "module",
   "scripts": {
@@ -38,7 +38,9 @@
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "vite-plugin-pwa": "^0.21.2",
+    "workbox-window": "^7.3.0"
   },
   "engines": {
     "node": ">=18.0.0"

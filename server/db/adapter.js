@@ -5,6 +5,7 @@ import mongoose from 'mongoose';
 import { ISSUER_DID, getIssuerDIDDocument, generateStudentWalletIdentity } from '../crypto/ecdsaEngine.js';
 import { hashPassword } from '../services/auth.js';
 import { publishChange } from '../services/events.js';
+import { shareCodeFor } from '../services/shareLinks.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'server', 'data');
 const JSON_DB_PATH = path.join(DATA_DIR, 'trusttrace_db.json');
@@ -239,7 +240,9 @@ function withDefaults(state) {
     // Accounts created before verification existed were already trusted.
     user.accountStatus ||= 'verified';
     if (DEMO_ACCOUNT_IDS.has(user.id)) user.isDemo = true;
+    user.shareCode ||= shareCodeFor(user.id);
   }
+  for (const cred of state.credentials) cred.shareCode ||= shareCodeFor(cred.id);
   return state;
 }
 
@@ -402,7 +405,8 @@ class TrustTraceDatabase {
 
   // Persists the in-memory state and notifies connected clients.
   // Writes are serialized so concurrent requests can't interleave bulk ops.
-  save(topics = ['data']) {
+  // notify: false persists without telling clients to refetch (token refreshes).
+  save(topics = ['data'], { notify = true } = {}) {
     if (this.state.txLogs.length > MAX_TX_LOGS) this.state.txLogs.length = MAX_TX_LOGS;
 
     if (this.mode === 'mongodb') {
@@ -412,7 +416,7 @@ class TrustTraceDatabase {
     } else {
       this.writeJsonFile();
     }
-    publishChange(topics);
+    if (notify) publishChange(topics);
     return this.writeChain;
   }
 

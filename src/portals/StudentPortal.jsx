@@ -18,6 +18,7 @@ import D3CompetencyGraph from '../components/D3CompetencyGraph.jsx';
 import Avatar from '../components/Avatar.jsx';
 import { resolveField, axisForCredential, axisColor } from '../../shared/skillTaxonomy.js';
 import { CredentialTags } from '../components/CredentialTags.jsx';
+import { shareLink } from '../lib/portfolioQr.js';
 
 export default function StudentPortal({
   student,
@@ -51,7 +52,9 @@ export default function StudentPortal({
   const isVisibleInSearch = student?.visibleInTalentSearch !== false;
 
   const handleCopyPortfolioLink = () => {
-    const shareUrl = `${window.location.origin}/verify?did=${encodeURIComponent(student?.did || '')}`;
+    const shareUrl = student?.shareCode
+      ? shareLink(student.shareCode)
+      : `${window.location.origin}/verify?did=${encodeURIComponent(student?.did || '')}`;
     navigator.clipboard?.writeText(shareUrl).catch(() => {});
     setCopiedLink(true);
     setTimeout(() => setCopiedLink(false), 2200);

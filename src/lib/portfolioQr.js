@@ -1,4 +1,16 @@
-// Self-contained portfolio QR payload ("TT1"). Carries the signed claims of the
+// Default QR: a short link (<origin>/v/<code>). The scanner fetches the signed
+// credentials from the server and verifies their signatures locally. Sparse
+// (version 3-4) codes scan instantly from across a booth.
+export function shareLink(code, origin = window.location.origin) {
+  return code ? `${origin}/v/${code}` : '';
+}
+
+export function extractShareCode(text) {
+  const m = String(text || '').match(/(?:\/v\/|^trusttrace:v:)([0-9a-z]{8})(?:[/?#]|$)/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+// Offline QR: self-contained portfolio payload ("TT1"). Carries the signed claims of the
 // holder's most recent public credentials so a recruiter can verify signatures
 // with no network. Same format is produced/consumed by the Flutter app
 // (flutter_app/lib/core/portfolio_qr.dart).

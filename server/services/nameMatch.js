@@ -46,7 +46,7 @@ function levenshtein(a, b) {
   return prev[b.length];
 }
 
-function similarity(a, b) {
+export function similarity(a, b) {
   const longest = Math.max(a.length, b.length);
   return longest === 0 ? 1 : 1 - levenshtein(a, b) / longest;
 }

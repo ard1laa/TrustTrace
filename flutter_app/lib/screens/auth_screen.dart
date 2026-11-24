@@ -10,7 +10,7 @@ import '../theme/trusttrace_theme.dart';
 import '../widgets/common.dart';
 import 'document_camera_screen.dart';
 
-const kAppVersion = '2.1.0';
+const kAppVersion = '2.2.0';
 
 Future<void> showServerConnectionDialog(BuildContext context, {VoidCallback? onSaved}) async {
   final ctrl = TextEditingController(text: ApiService.apiBaseUrl);

@@ -4,7 +4,8 @@ import zlib from 'zlib';
 import { compareNames, findNameInText, nameTokens } from './nameMatch.js';
 import { extractLayout, textOnlyLayout } from './ocrLayout.js';
 import { parseCertificate, looksLikePersonName, CATEGORIES } from './certificateParser.js';
-import { analyzeTampering } from './tamperForensics.js';
+import { detectScene } from './sceneDetector.js';
+import { analyzeTampering, locateNameRegion } from './tamperForensics.js';
 import { crossCheckEvent } from './eventCrossCheck.js';
 import { resolveField, inferAxisFromText } from '../../shared/skillTaxonomy.js';
 
@@ -180,6 +181,7 @@ async function runGeminiAudit({ apiKey, base64, mimeType, axes }) {
   "is3dMockupOrTabletop": boolean,
   "isAiGeneratedOrFake": boolean,
   "nameLooksEdited": boolean,
+  "nameEditEvidence": string,
   "recipientName": string,
   "issuingOrganization": string,
   "certificateHeading": string,
@@ -190,7 +192,13 @@ async function runGeminiAudit({ apiKey, base64, mimeType, axes }) {
   "competencyDomain": one of ${JSON.stringify(axes)},
   "textLines": [{ "text": string, "box_2d": [ymin, xmin, ymax, xmax] }]
 }
-Rules: is3dMockupOrTabletop is true only when the certificate is an object in a 3D scene. isAiGeneratedOrFake only for clear generation artefacts (garbled text, melted seals). nameLooksEdited only for visible pasting (mismatched font, halo, misalignment). eventOrProgramName is the specific event or course, not "Certificate of Achievement". resultOrPlacement is e.g. "1st Place", "CGPA 3.85", or "". box_2d values are 0-1000.`;
+Rules:
+- Judge the layout separately from the graphic design. Ribbons, diagonal bands, swooshes, gradients, borders, seals, photos, rotated decorative panels and script fonts are normal certificate design and are NOT evidence of anything.
+- is3dMockupOrTabletop: true only when the whole sheet is an object in a scene — visible table/desk/wall/hands around it, a cast shadow, or perspective where the sheet's text lines are rotated or converge together with its edges. Level text on a decorative tilted panel is a flat design.
+- isAiGeneratedOrFake: only for clear generation artefacts (garbled or nonsense text, melted seals or signatures).
+- nameLooksEdited: compare the recipient name with the text around it. A different font for the name is normal. Flag only physical evidence of pasting: a rectangle of slightly different background behind the name, halo or blurred edges around the letters, remnants of other letters, a baseline or tilt that differs from the page, or sharpness/resolution unlike the rest of the page. Put the evidence in nameEditEvidence, else "".
+- eventOrProgramName is the specific event or course, not "Certificate of Achievement". resultOrPlacement is e.g. "1st Place", "CGPA 3.85", or "".
+- textLines: every printed line, top to bottom; box_2d values are 0-1000.`;
   try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
@@ -241,16 +249,6 @@ function gate(id, number, title, status, detail, labels = {}) {
     statusLabel: status === 'pass' ? 'Passed' : status === 'warn' ? labels.warn || 'Needs review' : labels.fail || 'Rejected',
     detail
   };
-}
-
-function locateNameLine(lines, candidates) {
-  for (const name of candidates.filter(Boolean)) {
-    const tokens = nameTokens(name);
-    if (tokens.length < 1) continue;
-    const line = lines.find((l) => findNameInText(l.text, name).found || compareNames(l.text, name).matched);
-    if (line) return Object.assign(line, { nameTokens: tokens });
-  }
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,18 +306,18 @@ export async function analyzeCertificateUpload({
   const geometry = clientPixelMetrics?.version === 2 ? clientPixelMetrics : null;
   const gates = [];
 
-  // Gate 1 — geometry
-  const sceneDetected = Boolean(
-    geometry?.is3dMockup || (gemini?.is3dMockupOrTabletop && geometry && geometry.marginSides >= 3 && geometry.maxSkew >= 0.04)
-  );
+  // Gate 1 — flat document vs. certificate shown in a 3D scene (server-side;
+  // the client's measurement is only a fallback for formats sharp can't read).
+  const scene = mimeType.includes('pdf')
+    ? { verdict: 'flat', reason: 'Flat document layout confirmed (PDF).', geometry: null, shape: null, text: null }
+    : await detectScene({ buffer, layout, visionSaysScene: gemini ? Boolean(gemini.is3dMockupOrTabletop) : null, clientGeometry: geometry });
+  const sceneStatus = scene.verdict === 'scene' ? 'fail' : scene.verdict === 'possible' ? 'warn' : 'pass';
   gates.push(
     gate(
       'gate1_layout', 1, 'Gate 1: Document Layout',
-      sceneDetected ? 'fail' : 'pass',
-      sceneDetected
-        ? 'The certificate appears as an object in a 3D scene (on a desk or at an angle). Upload the original PDF or a flat scan.'
-        : geometry ? 'Flat document layout confirmed.' : 'Flat document layout confirmed (PDF or vector document).',
-      { fail: 'Rejected: 3D scene' }
+      sceneStatus,
+      sceneStatus === 'fail' ? `${scene.reason} Upload the original PDF or a flat scan.` : scene.reason,
+      { fail: 'Rejected: 3D scene', warn: 'Check layout' }
     )
   );
 
@@ -393,10 +391,11 @@ export async function analyzeCertificateUpload({
   );
 
   // Gate 6 — tamper forensics around the recipient name
-  const nameLine = locateNameLine(lines, [identityVerified ? studentName : '', triggerName, studentName]);
+  const nameLine = locateNameRegion(layout, [identityVerified ? studentName : '', triggerName, studentName]);
   const tamper = await analyzeTampering({ buffer, mimeType, layout, nameLine, metadataText: metadata.text });
   if (gemini?.nameLooksEdited && tamper.verdict === 'clean') {
-    tamper.signals.push({ id: 'visual', severity: 'moderate', label: 'Visual check flagged the name', detail: 'The vision model reports visible signs of a pasted name.' });
+    const evidence = String(gemini.nameEditEvidence || '').trim().slice(0, 160);
+    tamper.signals.push({ id: 'visual', severity: 'moderate', label: 'Visual check flagged the name', detail: evidence ? `The vision model reports a pasted name: ${evidence}.` : 'The vision model reports visible signs of a pasted name.' });
     tamper.verdict = 'suspicious';
   }
   const tamperStatus = tamper.verdict === 'tampered' ? 'fail' : tamper.verdict === 'suspicious' ? 'warn' : 'pass';
@@ -434,7 +433,8 @@ export async function analyzeCertificateUpload({
     fileSizeKB: Number((buffer.length / 1024).toFixed(1)),
     mimeType,
     dimensions: dims ? `${dims.width}×${dims.height}px` : geometry ? `${geometry.sourceWidth || geometry.width}×${geometry.sourceHeight || geometry.height}px` : 'Document',
-    geometry,
+    geometry: scene.geometry || geometry,
+    scene: { verdict: scene.verdict, shape: scene.shape, text: scene.text },
     ocrAvailable: hasOcr,
     ocrProvider: layout.provider,
     layoutAvailable: layout.hasBoxes,
@@ -457,7 +457,7 @@ export async function analyzeCertificateUpload({
       outcome === 'rejected'
         ? 'Rejected — this certificate failed verification'
         : outcome === 'review'
-        ? 'Needs registrar review — possible edits detected'
+        ? `Needs registrar review — ${warned.map((g) => g.statusLabel.toLowerCase()).join(', ')}`
         : 'Verified — passed all 6 checks (100%)',
     analyzedAt: new Date().toISOString()
   };

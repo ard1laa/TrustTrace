@@ -162,42 +162,10 @@ class StudentWalletScreen extends StatelessWidget {
   }
 
   void _showQr(BuildContext context, Map<String, dynamic>? cred) {
-    // Built from cached data, so it works with no connection at all.
-    final payload = buildPortfolioPayload(student, cred == null ? _mine : [cred]);
-    final url = encodePortfolioUrl(payload, ApiService.webOrigin);
-    final count = (payload['c'] as List).length;
     showModalBottomSheet(
       context: context,
-      showDragHandle: true,
       isScrollControlled: true,
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text(cred == null ? 'Your portfolio' : '${cred['achievementTitle']}',
-                textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 14),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(18)),
-              child: QrImageView(data: url, size: 250, errorCorrectionLevel: QrErrorCorrectLevel.L, backgroundColor: Colors.white),
-            ),
-            const SizedBox(height: 14),
-            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Icon(Icons.wifi_off_rounded, size: 18, color: TrustTraceTheme.linkedInBlue),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  count > 0
-                      ? 'Contains $count signed credential${count == 1 ? '' : 's'} a recruiter can verify offline.'
-                      : 'No public, minted credentials yet — this QR links to your profile only.',
-                  style: const TextStyle(fontSize: 12.5),
-                ),
-              ),
-            ]),
-          ]),
-        ),
-      ),
+      builder: (_) => ShareQrSheet(student: student, credential: cred, credentials: _mine),
     );
   }
 
@@ -881,6 +849,95 @@ class _ErrorBox extends StatelessWidget {
         const SizedBox(width: 8),
         Expanded(child: Text(message, style: const TextStyle(color: TrustTraceTheme.dangerRed, fontSize: 12.5, fontWeight: FontWeight.w600))),
       ]),
+    );
+  }
+}
+
+
+/// Share sheet. "Quick scan" shows a short link QR (sparse, scans from across a
+/// booth; needs the recruiter to be online). "Offline QR" embeds the signed
+/// claims, built from cached data, so it works with no connection at all.
+class ShareQrSheet extends StatefulWidget {
+  final Map<String, dynamic> student;
+  final Map<String, dynamic>? credential;
+  final List<Map<String, dynamic>> credentials;
+  const ShareQrSheet({super.key, required this.student, this.credential, required this.credentials});
+
+  @override
+  State<ShareQrSheet> createState() => _ShareQrSheetState();
+}
+
+class _ShareQrSheetState extends State<ShareQrSheet> {
+  bool _offline = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final cred = widget.credential;
+    final code = '${(cred ?? widget.student)['shareCode'] ?? ''}';
+    final quick = code.isNotEmpty && !_offline;
+    final payload = quick ? null : buildPortfolioPayload(widget.student, cred == null ? widget.credentials : [cred]);
+    final url = quick ? shareLink(ApiService.webOrigin, code) : encodePortfolioUrl(payload!, ApiService.webOrigin);
+    final count = payload == null ? 0 : (payload['c'] as List).length;
+    final hint = Theme.of(context).hintColor;
+
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text(cred == null ? 'Your portfolio' : '${cred['achievementTitle']}',
+              textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 14),
+          if (code.isNotEmpty) ...[
+            SegmentedButton<bool>(
+              showSelectedIcon: false,
+              segments: const [
+                ButtonSegment(value: false, icon: Icon(Icons.bolt_rounded, size: 16), label: Text('Quick scan')),
+                ButtonSegment(value: true, icon: Icon(Icons.wifi_off_rounded, size: 16), label: Text('Offline QR')),
+              ],
+              selected: {_offline},
+              onSelectionChanged: (v) => setState(() => _offline = v.first),
+            ),
+            const SizedBox(height: 14),
+          ],
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 220),
+            child: Container(
+              key: ValueKey(url),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(18),
+                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 18, offset: const Offset(0, 6))],
+              ),
+              child: QrImageView(
+                data: url,
+                size: 240,
+                errorCorrectionLevel: quick ? QrErrorCorrectLevel.M : QrErrorCorrectLevel.L,
+                backgroundColor: Colors.white,
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Icon(quick ? Icons.bolt_rounded : Icons.wifi_off_rounded, size: 18, color: TrustTraceTheme.linkedInBlue),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                quick
+                    ? 'Scans instantly, even from a distance. The recruiter\'s device downloads your signed credentials and checks every signature.'
+                    : count > 0
+                        ? 'Contains $count signed credential${count == 1 ? '' : 's'} a recruiter can verify offline.'
+                        : 'No public, minted credentials yet — this QR links to your profile only.',
+                style: const TextStyle(fontSize: 12.5),
+              ),
+            ),
+          ]),
+          if (quick) ...[
+            const SizedBox(height: 10),
+            SelectableText(url.replaceFirst(RegExp(r'^https?://'), ''), style: TextStyle(fontSize: 12, color: hint, fontFamily: 'Menlo')),
+          ],
+        ]),
+      ),
     );
   }
 }

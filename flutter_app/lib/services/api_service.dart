@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/material.dart' show ThemeMode, ValueNotifier;
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -28,6 +29,8 @@ class ApiService {
 
   static String apiBaseUrl = _defaultBaseUrl;
   static String? _token;
+  static String? _refreshToken;
+  static Future<bool?>? _refreshing;
   static Map<String, dynamic>? currentUser;
 
   static final ValueNotifier<bool> serverConnectedNotifier = ValueNotifier<bool>(false);
@@ -37,6 +40,7 @@ class ApiService {
 
   static const _kBaseUrl = 'api_base_url';
   static const _kToken = 'session_token';
+  static const _kRefresh = 'session_refresh_token';
   static const _kUser = 'session_user';
   static const _kDashboard = 'dashboard_cache';
   static const _kIssuerDid = 'issuer_did_document';
@@ -56,6 +60,7 @@ class ApiService {
     await LocalStore.init();
     apiBaseUrl = LocalStore.getString(_kBaseUrl) ?? _defaultBaseUrl;
     _token = LocalStore.getString(_kToken);
+    _refreshToken = LocalStore.getString(_kRefresh);
     developerTokenNotifier.value = LocalStore.getString(_kDevToken);
     currentUser = LocalStore.getJson(_kUser);
     if (_token == null) currentUser = null;
@@ -79,16 +84,91 @@ class ApiService {
     await LocalStore.setString(_kBaseUrl, clean);
   }
 
-  static Future<void> _saveSession(String? token, Map<String, dynamic>? user) async {
+  static Future<void> _saveSession(String? token, Map<String, dynamic>? user, {String? refreshToken}) async {
     _token = token;
     currentUser = user == null ? null : _normalizeUser(user);
     await LocalStore.setString(_kToken, token);
     await LocalStore.setJson(_kUser, currentUser);
+    if (token == null) {
+      _refreshToken = null;
+      await LocalStore.setString(_kRefresh, null);
+    } else if (refreshToken != null) {
+      _refreshToken = refreshToken;
+      await LocalStore.setString(_kRefresh, refreshToken);
+    }
   }
 
+  @visibleForTesting
+  static Future<void> debugSetSession(String? token, Map<String, dynamic>? user, {String? refreshToken}) =>
+      _saveSession(token, user, refreshToken: refreshToken);
+
+  @visibleForTesting
+  static String? get debugToken => _token;
+
+  /// Signs out here and ends the session on the server.
   static Future<void> signOut() async {
+    final refresh = _refreshToken;
+    final token = _token;
     await _saveSession(null, null);
     await LocalStore.setJson(_kDashboard, null);
+    if (refresh != null || token != null) {
+      unawaited(http
+          .post(Uri.parse('$apiBaseUrl/auth/logout'),
+              headers: {'Content-Type': 'application/json', if (token != null) 'Authorization': 'Bearer $token'},
+              body: jsonEncode({'refreshToken': refresh}))
+          .timeout(const Duration(seconds: 6))
+          .then((_) {}, onError: (_) {}));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session refresh. Access tokens last ~2 hours. Shortly before expiry, and
+  // after any 401 marked SESSION_EXPIRED, the refresh token buys a new pair and
+  // the request is retried once. If the session is over, the app returns to the
+  // sign-in screen with a "Session expired" message — never a dead button.
+  // ---------------------------------------------------------------------------
+  static int _tokenExpiry(String token) {
+    try {
+      final body = utf8.decode(base64Url.decode(base64Url.normalize(token.split('.')[1])));
+      final exp = (jsonDecode(body) as Map)['exp'];
+      return exp is num ? exp.toInt() : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  static bool _expiresSoon(String token) => _tokenExpiry(token) - 90 < DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+  /// true: refreshed. false: session is over. null: server unreachable.
+  static Future<bool?> refreshSession() => _refreshing ??= _doRefresh().whenComplete(() => _refreshing = null);
+
+  static Future<bool?> _doRefresh() async {
+    final refresh = _refreshToken;
+    if (refresh == null) return false;
+    try {
+      final res = await http
+          .post(Uri.parse('$apiBaseUrl/auth/refresh'),
+              headers: {
+                'Content-Type': 'application/json',
+                if (developerTokenNotifier.value != null) 'x-developer-token': developerTokenNotifier.value!,
+              },
+              body: jsonEncode({'refreshToken': refresh}))
+          .timeout(const Duration(seconds: 20));
+      if (res.statusCode == 401 || res.statusCode == 403) return false;
+      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+      final data = jsonDecode(res.body) as Map;
+      final user = data['user'] is Map ? Map<String, dynamic>.from(data['user'] as Map) : currentUser;
+      await _saveSession(data['token'].toString(), user, refreshToken: data['refreshToken']?.toString());
+      return true;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> _expireSession() async {
+    if (_token == null && _refreshToken == null) return;
+    await _saveSession(null, currentUser);
+    sessionExpiredNotifier.value++;
   }
 
   static Map<String, dynamic> _normalizeUser(Map<String, dynamic> raw) {
@@ -107,6 +187,21 @@ class ApiService {
     Map<String, dynamic>? body,
     Duration timeout = const Duration(seconds: 12),
   }) async {
+    if (_token != null && _refreshToken != null && _expiresSoon(_token!)) {
+      if (await refreshSession() == false) await _expireSession();
+    }
+    var res = await _send(method, path, body, timeout);
+    if (_token != null && res.status == 401 && res.data['code'] == 'SESSION_EXPIRED') {
+      final refreshed = await refreshSession();
+      if (refreshed == true) res = await _send(method, path, body, timeout);
+      if (refreshed == false || (refreshed == true && res.status == 401 && res.data['code'] == 'SESSION_EXPIRED')) {
+        await _expireSession();
+      }
+    }
+    return res;
+  }
+
+  static Future<ApiResult> _send(String method, String path, Map<String, dynamic>? body, Duration timeout) async {
     final headers = <String, String>{
       'Content-Type': 'application/json',
       if (_token != null) 'Authorization': 'Bearer $_token',
@@ -129,9 +224,6 @@ class ApiService {
         final decoded = jsonDecode(res.body);
         if (decoded is Map) data = Map<String, dynamic>.from(decoded);
       } catch (_) {}
-      if (res.statusCode == 401 && _token != null && !path.startsWith('/auth/')) {
-        sessionExpiredNotifier.value++;
-      }
       return ApiResult(res.statusCode, data);
     } catch (_) {
       serverConnectedNotifier.value = false;
@@ -142,7 +234,8 @@ class ApiService {
   static Future<ApiResult> _authCall(String path, Map<String, dynamic> body) async {
     final res = await _request('POST', path, body: body);
     if (res.ok && res.data['token'] != null && res.data['user'] is Map) {
-      await _saveSession(res.data['token'].toString(), Map<String, dynamic>.from(res.data['user'] as Map));
+      await _saveSession(res.data['token'].toString(), Map<String, dynamic>.from(res.data['user'] as Map),
+          refreshToken: res.data['refreshToken']?.toString());
       if (res.data['developerToken'] != null) await setDeveloperToken(res.data['developerToken'].toString());
     }
     return res;
@@ -221,7 +314,7 @@ class ApiService {
       if (res.data['me'] is Map) {
         await _saveSession(_token, Map<String, dynamic>.from(res.data['me'] as Map));
       } else if (_token != null) {
-        sessionExpiredNotifier.value++;
+        await _expireSession();
       }
       await LocalStore.setJson(_kDashboard, res.data);
       unawaited(refreshIssuerDid());
@@ -295,7 +388,7 @@ class ApiService {
   }
 
   static Future<ApiResult> verifyLookup(String lookup) =>
-      _request('POST', '/verify', body: {'candidateLookup': lookup}, timeout: const Duration(seconds: 8));
+      _request('POST', '/verify', body: {'candidateLookup': lookup}, timeout: const Duration(seconds: 20));
 
   // ---------------------------------------------------------------------------
   // Recruiter shortlist

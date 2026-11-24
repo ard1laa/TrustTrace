@@ -47,14 +47,18 @@ class VerificationService {
       );
     }
     if (res.offline) {
-      return const VerificationOutcome(
-          error: "You're offline and this code doesn't carry signed credentials. Ask the candidate for their TrustTrace portfolio QR.");
+      return VerificationOutcome(
+          error: extractShareCode(text) != null
+              ? "You're offline. Quick-scan QR codes need a connection to fetch the signed credentials — reconnect, or ask the candidate to show their Offline QR."
+              : "You're offline and this code doesn't carry signed credentials. Ask the candidate for their TrustTrace Offline QR.");
     }
     return VerificationOutcome(error: res.error ?? 'No matching candidate was found.');
   }
 
   static String _lookupFrom(String text, Map<String, dynamic>? payload) {
     if (payload != null) return payload['h']['d'].toString();
+    final code = extractShareCode(text);
+    if (code != null) return code;
     final uri = Uri.tryParse(text);
     if (uri != null && uri.hasScheme) {
       return uri.queryParameters['did'] ?? uri.queryParameters['student'] ?? uri.queryParameters['verify'] ?? text;

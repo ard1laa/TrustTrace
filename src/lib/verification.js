@@ -1,5 +1,5 @@
 import { publicKeyFromDidDocument, verifyCredentialSignature } from './p256.js';
-import { decodePortfolioText, verifyPortfolioPayload } from './portfolioQr.js';
+import { decodePortfolioText, verifyPortfolioPayload, extractShareCode } from './portfolioQr.js';
 import { loadSnapshot, saveSnapshot } from './offlineStore.js';
 
 const ISSUER_KEY = 'issuer-did-document';
@@ -64,12 +64,18 @@ export async function verifyScannedText(text) {
       return { mode: 'offline', holder: offline.holder, credentials: offline.credentials.map((c) => ({ ...c, revoked: false })), keySource: source, generatedAt: offline.generatedAt };
     }
     if (err.status) return { error: err.message };
-    return { error: "You're offline and this code doesn't contain signed credentials. Ask the candidate for their TrustTrace portfolio QR." };
+    return {
+      error: extractShareCode(text)
+        ? "You're offline. Short QR links need a connection to fetch the signed credentials — reconnect, or ask the candidate to show their Offline QR."
+        : "You're offline and this code doesn't contain signed credentials. Ask the candidate for their TrustTrace Offline QR."
+    };
   }
 }
 
 function extractLookup(text, payload) {
   if (payload?.h?.d) return payload.h.d;
+  const code = extractShareCode(text);
+  if (code) return code;
   const raw = String(text || '').trim();
   try {
     const parsed = JSON.parse(raw);
