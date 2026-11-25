@@ -1,0 +1,17 @@
+[
+  {
+    "file": "my-hackathon-certificate.pdf",
+    "holder": "Your Full Name",
+    "category": "genuine",
+    "kind": "original PDF from the organiser",
+    "expect": "verified",
+    "fields": { "title": "UTM Digital Innovation Hackathon 2025", "date": "2025-03-14", "result": "1st Place", "type": "Hackathon", "issuer": "Universiti Teknologi Malaysia" }
+  },
+  {
+    "file": "my-hackathon-certificate-name-edited.jpg",
+    "holder": "Someone Else",
+    "category": "forged",
+    "kind": "name changed in an image editor",
+    "expect": "not-verified"
+  }
+]

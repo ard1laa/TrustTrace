@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { X, UserRound, ShieldCheck, KeyRound, Trash2, Camera, Copy, Check, Download, Loader2, AlertCircle, Image as ImageIcon } from 'lucide-react';
 import Avatar from './Avatar.jsx';
 import FieldSelect from './FieldSelect.jsx';
+import SocialAuthButtons from './SocialAuthButtons.jsx';
 import { apiJson } from '../lib/api.js';
 
 const TABS = [
@@ -12,6 +13,9 @@ const TABS = [
 ];
 
 const TAB_ALIASES = { edit: 'profile', accounts: 'security' };
+
+const PROFILE_KEYS = ['name', 'headline', 'bio', 'location', 'university', 'fieldOfStudy', 'program', 'companyName', 'jobTitle', 'companyWebsite', 'departmentRole', 'avatarUrl'];
+const profileFromUser = (u) => Object.fromEntries(PROFILE_KEYS.map((k) => [k, u?.[k] || '']));
 
 // Downscales to a square JPEG so avatars stay small in the database and on mobile.
 function resizeImage(file, size = 320) {
@@ -37,8 +41,9 @@ function resizeImage(file, size = 320) {
   });
 }
 
+// Use inside a <label> that also wraps the input, so the caption names the field.
 function Label({ children }) {
-  return <label className="block text-xs font-semibold mb-1">{children}</label>;
+  return <span className="block text-xs font-semibold mb-1">{children}</span>;
 }
 
 function CopyRow({ label, value, tone = 'neutral' }) {
@@ -77,7 +82,7 @@ export default function ProfileSettingsModal({ isOpen, onClose, initialTab = 'pr
   const [tab, setTab] = useState('profile');
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
-  const [profile, setProfile] = useState({});
+  const [profile, setProfile] = useState(() => profileFromUser(currentUser));
   const [account, setAccount] = useState({ email: '', currentPassword: '', newPassword: '', confirmPassword: '' });
   const [recoveryInput, setRecoveryInput] = useState('');
   const [deleteConfirm, setDeleteConfirm] = useState('');
@@ -89,25 +94,29 @@ export default function ProfileSettingsModal({ isOpen, onClose, initialTab = 'pr
     setError('');
   }, [isOpen, initialTab]);
 
+  // Fill the form when the dialog opens (or the signed-in account changes), NOT
+  // whenever `currentUser` changes: background refreshes replace that object every
+  // few seconds, which used to wipe what the user was typing, so Save sent the old
+  // values while still saying "Profile updated." Done during render (React's
+  // "adjust state when a prop changes" pattern) so the fields never flash empty.
+  const formUserId = isOpen && currentUser ? currentUser.id : null;
+  const [formFor, setFormFor] = useState(null);
+  if (formFor !== formUserId) {
+    setFormFor(formUserId);
+    if (formUserId) {
+      setProfile(profileFromUser(currentUser));
+      setAccount({ email: currentUser.email || '', currentPassword: '', newPassword: '', confirmPassword: '' });
+      setDeleteConfirm('');
+    }
+  }
+
+  // Google / Apple linking needs the providers the server has configured.
+  // All hooks must run before the early return below: a hook that only runs
+  // while the modal is open makes React throw (#310) and blanks the whole app.
+  const [providers, setProviders] = useState(null);
   useEffect(() => {
-    if (!currentUser || !isOpen) return;
-    setProfile({
-      name: currentUser.name || '',
-      headline: currentUser.headline || '',
-      bio: currentUser.bio || '',
-      location: currentUser.location || '',
-      university: currentUser.university || '',
-      fieldOfStudy: currentUser.fieldOfStudy || '',
-      program: currentUser.program || '',
-      companyName: currentUser.companyName || '',
-      jobTitle: currentUser.jobTitle || '',
-      companyWebsite: currentUser.companyWebsite || '',
-      departmentRole: currentUser.departmentRole || '',
-      avatarUrl: currentUser.avatarUrl || ''
-    });
-    setAccount({ email: currentUser.email || '', currentPassword: '', newPassword: '', confirmPassword: '' });
-    setDeleteConfirm('');
-  }, [currentUser, isOpen]);
+    if (isOpen && !providers) apiJson('/api/auth/providers').then(setProviders).catch(() => {});
+  }, [isOpen, providers]);
 
   if (!isOpen || !currentUser) return null;
 
@@ -127,6 +136,20 @@ export default function ProfileSettingsModal({ isOpen, onClose, initialTab = 'pr
       setBusy('');
     }
   };
+
+  const linkProvider = (provider, idToken) =>
+    run(`link-${provider}`, async () => {
+      const data = await apiJson(`/api/auth/link/${provider}`, { method: 'POST', body: { idToken } });
+      onUserUpdated?.(data.user);
+      onNotify?.(data.message);
+    });
+
+  const unlinkProvider = (provider) =>
+    run(`unlink-${provider}`, async () => {
+      const data = await apiJson(`/api/auth/link/${provider}`, { method: 'DELETE' });
+      onUserUpdated?.(data.user);
+      onNotify?.(data.message);
+    });
 
   const saveProfile = (e) =>
     run('profile', async () => {
@@ -305,66 +328,66 @@ export default function ProfileSettingsModal({ isOpen, onClose, initialTab = 'pr
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
+                <label className="block">
                   <Label>Full name</Label>
                   <input required value={profile.name} onChange={setP('name')} className="linkedin-input" />
-                </div>
-                <div>
+                </label>
+                <label className="block">
                   <Label>Location</Label>
                   <input placeholder="City, Country" value={profile.location} onChange={setP('location')} className="linkedin-input" />
-                </div>
+                </label>
 
                 {isStudent && (
                   <>
                     <div className="sm:col-span-2">
                       <FieldSelect value={profile.fieldOfStudy} onChange={setP('fieldOfStudy')} />
                     </div>
-                    <div>
+                    <label className="block">
                       <Label>University</Label>
                       <input value={profile.university} onChange={setP('university')} className="linkedin-input" />
-                    </div>
-                    <div>
+                    </label>
+                    <label className="block">
                       <Label>Program (optional)</Label>
                       <input placeholder="e.g., BSc Computer Science" value={profile.program} onChange={setP('program')} className="linkedin-input" />
-                    </div>
+                    </label>
                   </>
                 )}
 
                 {currentUser.role === 'recruiter' && (
                   <>
-                    <div>
+                    <label className="block">
                       <Label>Company</Label>
                       <input value={profile.companyName} onChange={setP('companyName')} className="linkedin-input" />
-                    </div>
-                    <div>
+                    </label>
+                    <label className="block">
                       <Label>Job title</Label>
                       <input value={profile.jobTitle} onChange={setP('jobTitle')} className="linkedin-input" />
-                    </div>
+                    </label>
                   </>
                 )}
 
                 {currentUser.role === 'admin' && (
                   <>
-                    <div>
+                    <label className="block">
                       <Label>Institution</Label>
                       <input value={profile.university} onChange={setP('university')} className="linkedin-input" />
-                    </div>
-                    <div>
+                    </label>
+                    <label className="block">
                       <Label>Department</Label>
                       <input value={profile.departmentRole} onChange={setP('departmentRole')} className="linkedin-input" />
-                    </div>
+                    </label>
                   </>
                 )}
 
-                <div className="sm:col-span-2">
+                <label className="sm:col-span-2 block">
                   <Label>Headline</Label>
                   <input maxLength={120} value={profile.headline} onChange={setP('headline')} className="linkedin-input" />
-                </div>
-                <div className="sm:col-span-2">
+                </label>
+                <label className="sm:col-span-2 block">
                   <Label>About</Label>
                   <textarea rows={3} maxLength={600} placeholder="A short summary recruiters will see." value={profile.bio} onChange={setP('bio')} className="linkedin-input resize-none" />
-                  <p className="text-right text-[10px] text-[#999] mt-0.5">{(profile.bio || '').length}/600</p>
-                </div>
+                  <span className="block text-right text-[10px] text-[#999] mt-0.5">{(profile.bio || '').length}/600</span>
+                </label>
               </div>
 
               {currentUser.role === 'admin' && (
@@ -449,17 +472,38 @@ export default function ProfileSettingsModal({ isOpen, onClose, initialTab = 'pr
                 </button>
               </form>
 
-              <div className="pt-5 border-t border-[#E0DFDC] dark:border-[#30363D] space-y-2">
-                <h3 className="font-bold text-sm">Connected sign-in methods</h3>
-                <div className="flex flex-wrap gap-2">
-                  {hasPassword && <span className="chip bg-[#F4F2EE] dark:bg-[#0D1117]">Email & password</span>}
+              <div className="pt-5 border-t border-[#E0DFDC] dark:border-[#30363D] space-y-3">
+                <h3 className="font-bold text-sm">Sign-in methods</h3>
+                <ul className="space-y-2">
+                  {hasPassword && (
+                    <li className="flex items-center justify-between gap-2 text-xs">
+                      <span className="font-semibold">Email & password</span>
+                      <span className="chip bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">Active</span>
+                    </li>
+                  )}
                   {(currentUser.linkedProviders || []).map((p) => (
-                    <span key={p} className="chip bg-[#EBF3FB] text-[#0A66C2] dark:bg-[#0A66C2]/20 dark:text-[#58A6FF] capitalize">
-                      {p}
-                    </span>
+                    <li key={p} className="flex items-center justify-between gap-2 text-xs">
+                      <span className="font-semibold capitalize">{p}</span>
+                      <button type="button" disabled={busy === `unlink-${p}`} onClick={() => unlinkProvider(p)} className="linkedin-btn-neutral text-[11px] py-1 px-2.5">
+                        {busy === `unlink-${p}` && <Loader2 className="w-3 h-3 animate-spin" />}
+                        Unlink
+                      </button>
+                    </li>
                   ))}
-                </div>
-                <p className="text-[11px] text-[#666666] dark:text-[#8B949E]">Signing in with Google or Apple using this email links it automatically.</p>
+                </ul>
+                <SocialAuthButtons
+                  providers={providers}
+                  isDark={document.documentElement.classList.contains('dark')}
+                  disabled={busy.startsWith('link')}
+                  onToken={linkProvider}
+                  onError={setError}
+                  mode="link"
+                  dividerLabel=""
+                  exclude={currentUser.linkedProviders || []}
+                />
+                <p className="text-[11px] text-[#666666] dark:text-[#8B949E]">
+                  Linking proves you own both accounts, so it can only be done here while signed in.
+                </p>
               </div>
             </div>
           )}
@@ -498,12 +542,12 @@ export default function ProfileSettingsModal({ isOpen, onClose, initialTab = 'pr
                   This permanently removes your profile and every credential in your wallet, and burns the associated Soulbound Tokens. Certificate hashes are released, so the same files can be added to a new account later. This cannot be undone.
                 </p>
               </div>
-              <div>
+              <label className="block">
                 <Label>
                   Type <strong>DELETE</strong> to confirm
                 </Label>
                 <input value={deleteConfirm} onChange={(e) => setDeleteConfirm(e.target.value)} className="linkedin-input border-red-300 dark:border-red-800" />
-              </div>
+              </label>
               <div className="flex justify-end gap-2">
                 <button type="button" onClick={onClose} className="linkedin-btn-neutral text-xs">
                   Cancel

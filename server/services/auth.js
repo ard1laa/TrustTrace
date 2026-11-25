@@ -71,6 +71,31 @@ export function verifyJwt(token) {
 }
 
 // ---------------------------------------------------------------------------
+// Sealed payloads: tamper-proof (HMAC) JSON a client carries and hands back,
+// e.g. a scan result. Not encrypted — never put secrets in one.
+// ---------------------------------------------------------------------------
+export function sealPayload(payload, ttlSeconds) {
+  const body = Buffer.from(JSON.stringify({ p: payload, exp: Math.floor(Date.now() / 1000) + ttlSeconds })).toString('base64url');
+  const sig = crypto.createHmac('sha256', `${JWT_SECRET}:sealed`).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+
+// Returns { payload } or { error: 'invalid' | 'expired' }.
+export function openPayload(token) {
+  const [body, sig] = String(token || '').split('.');
+  if (!body || !sig) return { error: 'invalid' };
+  const expected = crypto.createHmac('sha256', `${JWT_SECRET}:sealed`).update(body).digest('base64url');
+  if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return { error: 'invalid' };
+  try {
+    const { p, exp } = JSON.parse(Buffer.from(body, 'base64url').toString('utf-8'));
+    if (exp < Math.floor(Date.now() / 1000)) return { error: 'expired' };
+    return { payload: p };
+  } catch {
+    return { error: 'invalid' };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Sessions. Each sign-in creates a session on the user record holding hashed
 // refresh tokens. Refreshing rotates the token; signing out or changing the
 // password removes sessions, which also invalidates their access tokens.
@@ -260,7 +285,11 @@ async function getJwks(url) {
   return keys;
 }
 
-async function verifyRs256IdToken(idToken, { jwksUrl, issuers, audiences }) {
+// Tests point verification at a local key set; ignored in production.
+const TEST_JWKS_URL = process.env.NODE_ENV !== 'production' ? process.env.OAUTH_TEST_JWKS_URL || '' : '';
+
+async function verifyRs256IdToken(idToken, { jwksUrl: providerJwks, issuers, audiences }) {
+  const jwksUrl = TEST_JWKS_URL || providerJwks;
   const parts = String(idToken || '').split('.');
   if (parts.length !== 3) throw new Error('Malformed identity token.');
   const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf-8'));
@@ -278,7 +307,10 @@ async function verifyRs256IdToken(idToken, { jwksUrl, issuers, audiences }) {
   if (!issuers.includes(payload.iss)) throw new Error('Unexpected token issuer.');
   const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
   if (!aud.some((a) => audiences.includes(a))) throw new Error('Token was issued for a different app.');
-  if (!payload.exp || payload.exp * 1000 < Date.now()) throw new Error('Token has expired.');
+  const nowS = Date.now() / 1000;
+  if (!payload.exp || payload.exp < nowS - 60) throw new Error('Token has expired. Please try again.');
+  if (payload.iat && payload.iat > nowS + 300) throw new Error('Token issue time is in the future.');
+  if (!payload.sub) throw new Error('Token has no subject.');
   return payload;
 }
 
@@ -290,8 +322,14 @@ export async function verifyGoogleIdToken(idToken) {
     issuers: ['https://accounts.google.com', 'accounts.google.com'],
     audiences: google.audiences
   });
-  if (claims.email && claims.email_verified === false) throw new Error('Google account email is not verified.');
-  return { provider: 'google', subject: claims.sub, email: claims.email || '', name: claims.name || '', picture: claims.picture || '' };
+  return {
+    provider: 'google',
+    subject: claims.sub,
+    email: claims.email || '',
+    emailVerified: claims.email_verified === true || claims.email_verified === 'true',
+    name: claims.name || '',
+    picture: claims.picture || ''
+  };
 }
 
 export async function verifyAppleIdToken(idToken) {
@@ -302,5 +340,13 @@ export async function verifyAppleIdToken(idToken) {
     issuers: ['https://appleid.apple.com'],
     audiences: apple.audiences
   });
-  return { provider: 'apple', subject: claims.sub, email: claims.email || '', name: '', picture: '' };
+  // Apple only shares verified addresses (including private relay ones).
+  return {
+    provider: 'apple',
+    subject: claims.sub,
+    email: claims.email || '',
+    emailVerified: claims.email_verified === undefined || claims.email_verified === true || claims.email_verified === 'true',
+    name: '',
+    picture: ''
+  };
 }

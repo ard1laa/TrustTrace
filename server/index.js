@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { db } from './db/adapter.js';
 import {
@@ -34,6 +35,8 @@ import {
   hashPassword,
   verifyPassword,
   createAuthMiddleware,
+  sealPayload,
+  openPayload,
   createSession,
   parseRefreshToken,
   rotateSession,
@@ -44,9 +47,11 @@ import {
   verifyAppleIdToken
 } from './services/auth.js';
 import { sseHandler, currentRevision } from './services/events.js';
+import { similarity } from './services/nameMatch.js';
 import { shareCodeFor, parseShareCode, resolveShareCode } from './services/shareLinks.js';
 import { resolveField, isKnownFieldId, publicTaxonomy } from '../shared/skillTaxonomy.js';
 
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '25mb' }));
@@ -154,7 +159,7 @@ function headlineFor(user) {
 // ---------------------------------------------------------------------------
 app.get('/api/status', (_req, res) => {
   let soliditySource = '';
-  const solPath = path.resolve(process.cwd(), 'contracts', 'TrustTraceSBT.sol');
+  const solPath = path.join(PROJECT_ROOT, 'contracts', 'TrustTraceSBT.sol');
   if (fs.existsSync(solPath)) soliditySource = fs.readFileSync(solPath, 'utf-8');
   res.json({
     ok: true,
@@ -183,7 +188,14 @@ app.get('/api/events', sseHandler);
 app.get('/api/auth/providers', (_req, res) => {
   // demoLogin tells the hidden developer panel whether it needs a key; the
   // panel itself is never shown until the developer gesture is used.
-  res.json({ ...publicProviderConfig(), demoLogin: DEMO_LOGIN_ENABLED, developerKeyRequired: !DEMO_LOGIN_ENABLED && developerKeyConfigured() });
+  // setupHints: outside production, unconfigured providers are still shown
+  // (disabled) with the setting to add, so a developer can see what's missing.
+  res.json({
+    ...publicProviderConfig(),
+    setupHints: process.env.NODE_ENV !== 'production',
+    demoLogin: DEMO_LOGIN_ENABLED,
+    developerKeyRequired: !DEMO_LOGIN_ENABLED && developerKeyConfigured()
+  });
 });
 
 app.post('/api/auth/login', optionalAuth, (req, res) => {
@@ -339,43 +351,115 @@ app.post('/api/auth/register', (req, res) => {
   res.json(authResponse(user, welcomeMessage(user), req));
 });
 
+// Google / Apple sign-in. Identity tokens are verified on the server
+// (signature, issuer, audience, expiry) — the client's word is never trusted.
+//   • Known provider account          → signed in.
+//   • Email matches a registrar pre-issued account nobody has claimed yet
+//     → linked (the provider proves the email) and signed in.
+//   • Email matches any other account  → refused with LINK_REQUIRED: the owner
+//     signs in the usual way and links Google/Apple from their profile.
+//     TrustTrace doesn't verify emails at sign-up (and lets users change
+//     theirs), so silent email linking would let someone pre-register — or
+//     switch to — a victim's address and share the victim's account.
+//   • New person                      → { needsOnboarding } until the client
+//     sends signup: true with a role and the same onboarding fields as email
+//     sign-up. Recruiter and staff roles still wait for registrar approval.
+const providerLabel = (p) => (p === 'google' ? 'Google' : 'Apple');
+const providerMatch = (identity) => (u) => (u.authProviders || []).some((p) => p.provider === identity.provider && p.subject === identity.subject);
+
 async function handleOAuth(req, res, verify) {
+  let identity;
   try {
-    const identity = await verify(req.body.idToken);
-    const providerMatch = (u) => (u.authProviders || []).some((p) => p.provider === identity.provider && p.subject === identity.subject);
-    let user = db.state.users.find(providerMatch) || db.findUserByEmail(identity.email);
-
-    if (user) {
-      if (!providerMatch(user)) {
-        user.authProviders = [...(user.authProviders || []), { provider: identity.provider, subject: identity.subject, linkedAt: new Date().toISOString() }];
-      }
-      if (user.pendingClaim) delete user.pendingClaim;
-      if (!user.avatarUrl && identity.picture) user.avatarUrl = identity.picture;
-      db.save(['users']);
-      return res.json(authResponse(user, `Signed in with ${identity.provider === 'google' ? 'Google' : 'Apple'}.`, req));
-    }
-
-    // New account: the client supplies role and onboarding fields alongside the token.
-    const role = req.body.role || 'student';
-    if (!identity.email) return res.status(400).json({ error: 'Your Apple ID did not share an email address. Please allow email sharing and try again.' });
-    const roleError = validateRoleFields(role, req.body, identity.email);
-    if (roleError) return res.status(400).json({ error: roleError, needsOnboarding: true });
-
-    const name = (req.body.name || identity.name || identity.email.split('@')[0]).trim();
-    user = buildNewUser(req.body, { role, email: identity.email.toLowerCase(), name });
-    user.authProviders = [{ provider: identity.provider, subject: identity.subject, linkedAt: new Date().toISOString() }];
-    user.avatarUrl = identity.picture || '';
-    user.shareCode = shareCodeFor(user.id);
-  db.state.users.unshift(user);
-    db.save(['users']);
-    res.json(authResponse(user, welcomeMessage(user), req));
+    identity = await verify(req.body.idToken);
   } catch (err) {
-    res.status(401).json({ error: err.message || 'Sign-in failed.' });
+    return res.status(401).json({ error: err.message || 'Sign-in failed.' });
   }
+  const label = providerLabel(identity.provider);
+
+  let user = db.state.users.find(providerMatch(identity));
+  if (user) {
+    if (user.isDemo && !demoAllowed(req)) return res.status(403).json({ error: 'Demo accounts are disabled on this server.' });
+    if (!user.avatarUrl && identity.picture) user.avatarUrl = identity.picture;
+    return res.json(authResponse(user, `Signed in with ${label}.`, req));
+  }
+
+  if (!identity.email) return res.status(400).json({ error: 'Your Apple ID did not share an email address. Please allow email sharing and try again.' });
+  if (!identity.emailVerified) return res.status(400).json({ error: `Your ${label} email address is not verified.` });
+
+  const existing = db.findUserByEmail(identity.email);
+  if (existing) {
+    if (existing.isDemo) return res.status(403).json({ error: 'That email belongs to a demo account.' });
+    if (!existing.pendingClaim) {
+      const via = existing.passwordHash
+        ? 'your password'
+        : (existing.authProviders || []).map((p) => providerLabel(p.provider)).join(' or ') || 'your usual method';
+      return res.status(409).json({
+        error: `An account with ${identity.email} already exists. Sign in with ${via}, then link ${label} in Profile → Security → Sign-in methods.`,
+        code: 'LINK_REQUIRED',
+        email: identity.email
+      });
+    }
+    existing.authProviders = [...(existing.authProviders || []), { provider: identity.provider, subject: identity.subject, linkedAt: new Date().toISOString() }];
+    if (existing.pendingClaim) delete existing.pendingClaim;
+    if (!existing.avatarUrl && identity.picture) existing.avatarUrl = identity.picture;
+    db.save(['users']);
+    return res.json(authResponse(existing, `Signed in with ${label}.`, req));
+  }
+
+  // New person: collect the role and onboarding fields first.
+  const profile = { email: identity.email, name: (req.body.name || identity.name || '').trim() };
+  if (!req.body.signup) return res.json({ needsOnboarding: true, provider: identity.provider, profile });
+
+  const role = req.body.role;
+  const roleError = validateRoleFields(role, req.body, identity.email);
+  if (roleError) return res.status(400).json({ error: roleError, needsOnboarding: true, profile });
+
+  const name = profile.name || identity.email.split('@')[0];
+  user = buildNewUser(req.body, { role, email: identity.email.toLowerCase(), name });
+  user.authProviders = [{ provider: identity.provider, subject: identity.subject, linkedAt: new Date().toISOString() }];
+  user.avatarUrl = identity.picture || '';
+  user.shareCode = shareCodeFor(user.id);
+  db.state.users.unshift(user);
+  db.save(['users']);
+  res.json(authResponse(user, welcomeMessage(user), req));
+}
+
+// Link Google/Apple to the signed-in account (proves ownership of both).
+async function handleLink(req, res, verify) {
+  let identity;
+  try {
+    identity = await verify(req.body.idToken);
+  } catch (err) {
+    return res.status(401).json({ error: err.message || 'Could not verify that account.' });
+  }
+  const owner = db.state.users.find(providerMatch(identity));
+  if (owner && owner.id !== req.user.id) {
+    return res.status(409).json({ error: `That ${providerLabel(identity.provider)} account is already linked to another TrustTrace account.` });
+  }
+  if (!owner) {
+    req.user.authProviders = [
+      ...(req.user.authProviders || []).filter((p) => p.provider !== identity.provider),
+      { provider: identity.provider, subject: identity.subject, linkedAt: new Date().toISOString() }
+    ];
+    db.save(['users']);
+  }
+  res.json({ ok: true, user: selfUser(req.user), message: `${providerLabel(identity.provider)} is now linked. You can use it to sign in.` });
 }
 
 app.post('/api/auth/oauth/google', (req, res) => handleOAuth(req, res, verifyGoogleIdToken));
 app.post('/api/auth/oauth/apple', (req, res) => handleOAuth(req, res, verifyAppleIdToken));
+app.post('/api/auth/link/google', requireAuth, (req, res) => handleLink(req, res, verifyGoogleIdToken));
+app.post('/api/auth/link/apple', requireAuth, (req, res) => handleLink(req, res, verifyAppleIdToken));
+
+app.delete('/api/auth/link/:provider', requireAuth, (req, res) => {
+  const remaining = (req.user.authProviders || []).filter((p) => p.provider !== req.params.provider);
+  if (!req.user.passwordHash && remaining.length === 0) {
+    return res.status(400).json({ error: 'Set a password first, or you would have no way to sign in.' });
+  }
+  req.user.authProviders = remaining;
+  db.save(['users']);
+  res.json({ ok: true, user: selfUser(req.user), message: `${providerLabel(req.params.provider)} unlinked.` });
+});
 
 // Apple's web flow can POST the token to a redirect URI; hand it back to the SPA.
 app.post('/api/auth/oauth/apple/callback', (req, res) => {
@@ -426,52 +510,69 @@ app.post('/api/auth/verification-proof', requireAuth, (req, res) => {
   res.json({ user: selfUser(user), message: 'Document submitted. A registrar will review it shortly.' });
 });
 
-const PROFILE_FIELDS = ['name', 'university', 'program', 'headline', 'bio', 'location', 'companyName', 'jobTitle', 'companyWebsite', 'departmentRole', 'visibleInTalentSearch'];
+// Which profile fields each role may edit, with max lengths. Anything else in the
+// body (e.g. a student's empty `companyName` from a shared form) is ignored.
+const PROFILE_FIELD_LIMITS = { name: 120, headline: 120, bio: 600, location: 120, university: 160, program: 160, companyName: 160, jobTitle: 120, companyWebsite: 200, departmentRole: 120 };
+const PROFILE_FIELDS_BY_ROLE = {
+  student: ['name', 'headline', 'bio', 'location', 'university', 'program'],
+  recruiter: ['name', 'headline', 'bio', 'location', 'companyName', 'jobTitle', 'companyWebsite'],
+  admin: ['name', 'headline', 'bio', 'location', 'university', 'departmentRole']
+};
 
 app.put('/api/auth/profile/:userId', requireSelfOr('userId', 'admin'), (req, res) => {
   const user = db.findUserById(req.params.userId);
   if (!user) return res.status(404).json({ error: 'User not found.' });
-  const body = req.body || {};
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
 
-  for (const key of PROFILE_FIELDS) {
-    if (body[key] !== undefined) user[key] = typeof body[key] === 'string' ? body[key].trim() : body[key];
+  // 1. Validate everything first, so a rejected request never half-changes the account.
+  const updates = {};
+  for (const key of PROFILE_FIELDS_BY_ROLE[user.role] || ['name']) {
+    if (body[key] === undefined || body[key] === null) continue;
+    if (typeof body[key] !== 'string') return res.status(400).json({ error: `${key} must be text.` });
+    const value = body[key].trim();
+    if (value.length > PROFILE_FIELD_LIMITS[key]) return res.status(400).json({ error: `${key} is too long (max ${PROFILE_FIELD_LIMITS[key]} characters).` });
+    updates[key] = value;
   }
-  if (body.name !== undefined && !String(body.name).trim()) return res.status(400).json({ error: 'Name cannot be empty.' });
-
-  if (body.fieldOfStudy !== undefined && user.role === 'student') {
-    user.fieldOfStudy = normalizeField(body.fieldOfStudy, user.program);
+  if (updates.name !== undefined && !updates.name) return res.status(400).json({ error: 'Name cannot be empty.' });
+  if (updates.companyWebsite && !/^(https?:\/\/)?[^\s/$.?#].[^\s]*$/i.test(updates.companyWebsite)) {
+    return res.status(400).json({ error: 'Enter a valid company website.' });
   }
+  if (user.role === 'student' && body.visibleInTalentSearch !== undefined) updates.visibleInTalentSearch = Boolean(body.visibleInTalentSearch);
 
+  let avatarUrl;
   if (body.avatarUrl !== undefined) {
-    const url = String(body.avatarUrl || '');
-    if (url && !/^data:image\/(png|jpe?g|webp);base64,/.test(url) && !/^https:\/\//.test(url)) {
+    avatarUrl = typeof body.avatarUrl === 'string' ? body.avatarUrl : '';
+    if (avatarUrl && !/^data:image\/(png|jpe?g|webp);base64,/.test(avatarUrl) && !/^https:\/\//.test(avatarUrl)) {
       return res.status(400).json({ error: 'Profile photo must be a PNG, JPEG or WebP image.' });
     }
-    if (url.startsWith('data:') && Buffer.byteLength(url) > MAX_AVATAR_BYTES) {
+    if (avatarUrl.startsWith('data:') && Buffer.byteLength(avatarUrl) > MAX_AVATAR_BYTES) {
       return res.status(413).json({ error: 'Profile photo is too large (max 600 KB).' });
     }
-    user.avatarUrl = url;
   }
 
-  if (body.email !== undefined && String(body.email).trim().toLowerCase() !== user.email) {
-    const email = String(body.email).trim().toLowerCase();
+  let email;
+  if (typeof body.email === 'string' && body.email.trim().toLowerCase() !== user.email) {
+    email = body.email.trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
     if (db.findUserByEmail(email)) return res.status(409).json({ error: 'That email is already used by another account.' });
     if (user.passwordHash && req.user.id === user.id && !verifyPassword(body.currentPassword, user.passwordHash).ok) {
       return res.status(401).json({ error: 'Enter your current password to change your email.' });
     }
-    user.email = email;
   }
 
-  if (body.headline === undefined && (body.fieldOfStudy !== undefined || body.university !== undefined || body.jobTitle !== undefined)) {
+  // 2. Apply.
+  Object.assign(user, updates);
+  if (body.fieldOfStudy !== undefined && user.role === 'student') user.fieldOfStudy = normalizeField(body.fieldOfStudy, user.program);
+  if (avatarUrl !== undefined) user.avatarUrl = avatarUrl;
+  if (email) user.email = email;
+  if (body.headline === undefined && (body.fieldOfStudy !== undefined || updates.university !== undefined || updates.jobTitle !== undefined)) {
     user.headline = headlineFor(user);
   }
-
-  if (body.name) {
+  if (updates.name) {
     for (const c of db.state.credentials) if (c.studentUserId === user.id) c.studentName = user.name;
   }
 
-  db.save(['users']);
+  db.save(updates.name ? ['users', 'credentials'] : ['users']);
   res.json({ user: req.user.id === user.id ? selfUser(user) : publicUser(user), message: 'Profile saved.' });
 });
 
@@ -679,23 +780,36 @@ app.patch('/api/admin/logo-registry/:id', requireRole('admin'), (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Certificate scanning. Results are held server-side for 30 minutes and
-// referenced by scanId at issuance, so a client can't submit its own verdict.
+// Certificate scanning. The verdict travels back to the client as a sealed
+// (HMAC-signed) scan token and is handed in at issuance, so a client can't
+// submit its own verdict. Being stateless, it survives server restarts,
+// sleeping free-tier hosts and serverless instances — the old in-memory
+// 30-minute cache made "Add to wallet" fail after a coffee break.
 // ---------------------------------------------------------------------------
-const SCAN_TTL_MS = 30 * 60 * 1000;
-const recentScans = new Map();
+const SCAN_TOKEN_TTL_S = 24 * 60 * 60;
 
-function rememberScan(userId, result) {
-  const now = Date.now();
-  for (const [id, scan] of recentScans) if (scan.expiresAt < now) recentScans.delete(id);
-  const scanId = crypto.randomUUID();
-  recentScans.set(scanId, { userId, ...result, expiresAt: now + SCAN_TTL_MS });
-  return scanId;
+function sealScan(userId, result) {
+  const { metrics, ...tamper } = result.forensics.tamper || {};
+  return sealPayload({ userId, extracted: result.extracted, forensics: { ...result.forensics, tamper } }, SCAN_TOKEN_TTL_S);
+}
+
+// Earlier credentials registered with the same file or certificate number.
+function registryCheckFor(subject) {
+  return async ({ fileHash, certificateNumber }) => {
+    const sameFile = db.state.credentials.filter((c) => c.fileHash === fileHash);
+    const number = certificateNumber && certificateNumber.length >= 5 ? certificateNumber.toUpperCase() : '';
+    return {
+      sameFileOtherAccount: sameFile.some((c) => c.studentUserId !== subject.id),
+      sameFileThisAccount: sameFile.some((c) => c.studentUserId === subject.id),
+      numberOtherAccount: Boolean(number) && db.state.credentials.some((c) => c.studentUserId !== subject.id && c.aiForensics?.certificateNumber === number)
+    };
+  };
 }
 
 async function handleVerifyUpload(req, res) {
   try {
     const { fileBase64, fileName, mimeType, clientPixelMetrics, clientOcrText, studentUserId } = req.body;
+    if (!fileBase64) return res.status(400).json({ error: 'Choose a certificate file to upload.' });
     // Admins may scan on behalf of a student; everyone else is checked against their own name.
     const subject = req.user.role === 'admin' && studentUserId ? db.findUserById(studentUserId) || req.user : req.user;
     const result = await analyzeCertificateUpload({
@@ -707,13 +821,37 @@ async function handleVerifyUpload(req, res) {
       studentUniversity: subject.university,
       studentField: subject.fieldOfStudy || subject.program,
       clientPixelMetrics,
-      clientOcrText
+      clientOcrText,
+      registryCheck: registryCheckFor(subject)
     });
-    const scanId = rememberScan(subject.id, result);
-    res.json({ ok: true, scanId, ...result });
+    const scanToken = sealScan(subject.id, result);
+    res.json({ ok: true, scanId: scanToken, scanToken, ...result });
   } catch (err) {
     res.status(400).json({ error: err.message || 'Could not analyze this file.' });
   }
+}
+
+// Fields the student changed after the scan read them. Small fixes (case,
+// punctuation) are fine; a different title, issuer, date or result is a claim
+// the scan never saw, so a registrar has to confirm it.
+function editedAfterScan(extracted, body) {
+  const changes = [];
+  const differs = (a, b) => {
+    const x = String(a || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const y = String(b || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    return x && y && x !== y && similarity(x, y) < 0.85;
+  };
+  if (extracted.detected?.title !== false && differs(extracted.achievementTitle, body.achievementTitle)) changes.push(`title ("${extracted.achievementTitle}" → "${body.achievementTitle}")`);
+  if (extracted.detected?.issuer !== false && differs(extracted.issuingOrganization, body.issuingOrganization)) changes.push(`issuer ("${extracted.issuingOrganization}" → "${body.issuingOrganization}")`);
+  if (extracted.issuanceDate && body.issuanceDate) {
+    const days = Math.abs(new Date(extracted.issuanceDate) - new Date(body.issuanceDate)) / 86400000;
+    if (days > 3) changes.push(`date (${extracted.issuanceDate} → ${String(body.issuanceDate).slice(0, 10)})`);
+  }
+  const claimed = body.requiresScoring ? String(body.achievementResult || '').trim() : '';
+  if (claimed && (!extracted.achievementResult || differs(extracted.achievementResult, claimed))) {
+    changes.push(extracted.achievementResult ? `result ("${extracted.achievementResult}" → "${claimed}")` : `result "${claimed}" (not printed on the scan)`);
+  }
+  return changes;
 }
 
 app.post('/api/certificates/verify-upload', requireRole('student', 'admin'), handleVerifyUpload);
@@ -771,9 +909,16 @@ app.post('/api/credentials/issue', requireRole('student', 'admin'), (req, res) =
   if (requiresScoring && !achievementResult) return res.status(400).json({ error: 'Enter the result or placement, or turn off scoring.' });
 
   let scan = null;
-  if (scanId) {
-    scan = recentScans.get(scanId);
-    if (!scan || scan.expiresAt < Date.now()) return res.status(410).json({ error: 'This scan has expired. Please upload the certificate again.' });
+  const scanToken = req.body.scanToken || scanId;
+  if (scanToken) {
+    const opened = openPayload(scanToken);
+    if (opened.error) {
+      return res.status(410).json({
+        error: opened.error === 'expired' ? 'This scan is more than 24 hours old. Please upload the certificate again.' : 'This scan could not be verified. Please upload the certificate again.',
+        code: 'SCAN_EXPIRED'
+      });
+    }
+    scan = opened.payload;
   } else if (!isAdmin) {
     return res.status(400).json({ error: 'Upload and verify your certificate before adding it to your wallet.' });
   }
@@ -821,8 +966,10 @@ app.post('/api/credentials/issue', requireRole('student', 'admin'), (req, res) =
     }
   });
 
-  // Possible edits found by the scanner always go to a registrar.
-  const forcedReview = scan?.forensics.outcome === 'review';
+  // Possible edits, unverifiable scans and fields changed after the scan all go to a registrar.
+  const edits = scan ? editedAfterScan(scan.extracted || {}, req.body) : [];
+  const scanNeedsReview = ['review', 'inconclusive'].includes(scan?.forensics.outcome);
+  const forcedReview = scanNeedsReview || edits.length > 0;
   const queue = req.body.validationMode === 'queue' || forcedReview;
   const tokenId = queue ? null : db.state.meta.nextTokenId++;
   const tx = queue
@@ -857,20 +1004,31 @@ app.post('/api/credentials/issue', requireRole('student', 'admin'), (req, res) =
     txHash: queue ? null : tx.txHash,
     blockNumber: queue ? null : tx.blockNumber,
     verifiableCredential: signed.verifiableCredential,
-    aiForensics: scan?.forensics || { issuedBy: req.user.id, passed: true, overallConfidence: 100, verdict: 'Issued directly by the registrar' },
+    aiForensics: scan
+      ? {
+          ...scan.forensics,
+          ...(edits.length
+            ? { editedAfterScan: edits, reviewReasons: [...(scan.forensics.reviewReasons || []), `Edited after scan: the student changed the ${edits.join('; ')}.`] }
+            : {}),
+          outcome: edits.length && scan.forensics.outcome === 'verified' ? 'review' : scan.forensics.outcome
+        }
+      : { issuedBy: req.user.id, passed: true, overallConfidence: 100, verdict: 'Issued directly by the registrar' },
     revocationReason: null,
     createdAt: new Date().toISOString()
   };
 
   credential.shareCode = shareCodeFor(credential.id);
   db.state.credentials.unshift(credential);
-  if (scanId) recentScans.delete(scanId);
   db.save(['credentials']);
   res.json({
     ok: true,
     credential,
-    message: forcedReview
-      ? 'Sent to the registrar — the scan found possible edits that need a human check.'
+    message: edits.length
+      ? `Sent to the registrar — you changed the ${edits.map((e) => e.split(' ')[0]).join(', ')} the scan read, so a person will confirm it.`
+      : scan?.forensics.outcome === 'inconclusive'
+      ? 'Sent to the registrar — the scan could not verify this certificate automatically.'
+      : forcedReview
+      ? 'Sent to the registrar — the scan found possible problems that need a human check.'
       : queue
       ? 'Sent to the registrar for approval.'
       : `Verified and minted as Soulbound Token #${tokenId}.`
@@ -1012,11 +1170,14 @@ function normalizeLookup(raw) {
   return q;
 }
 
-app.post('/api/verify', (req, res) => {
+app.post('/api/verify', optionalAuth, (req, res) => {
   const { credentialId, tokenId, rawVcJson, candidateLookup, simulateTamper = false } = req.body;
   const query = normalizeLookup(credentialId || candidateLookup);
   const qLower = query.toLowerCase();
   const visible = (c) => c.isPublic !== false && c.state !== 'Draft';
+  // Private and draft credentials stay hidden from public lookups (any form of
+  // ID), except for their owner and the registrar.
+  const viewerMaySee = (c) => visible(c) || req.user?.role === 'admin' || req.user?.id === c.studentUserId;
 
   let cred = null;
   let candidate = null;
@@ -1056,6 +1217,10 @@ app.post('/api/verify', (req, res) => {
   let vc = rawVcJson || (cred ? structuredClone(cred.verifiableCredential) : null);
   if (!cred && vc) {
     cred = db.state.credentials.find((c) => c.verifiableCredential?.id === vc.id || c.credentialHash?.toLowerCase() === vc?.proof?.hashZ?.toLowerCase()) || null;
+  }
+  // A presented VC file (rawVcJson) came from the holder, so it is checked regardless.
+  if (cred && !rawVcJson && !viewerMaySee(cred)) {
+    return res.status(404).json({ error: 'This credential is private or no longer shared.' });
   }
   if (cred && !candidate) candidate = db.findUserById(cred.studentUserId);
 
@@ -1108,7 +1273,7 @@ app.use((err, _req, res, _next) => {
 // ---------------------------------------------------------------------------
 // Production frontend
 // ---------------------------------------------------------------------------
-const distDir = path.resolve(process.cwd(), 'dist');
+const distDir = path.join(PROJECT_ROOT, 'dist');
 if (fs.existsSync(distDir)) {
   app.use(
     express.static(distDir, {

@@ -17,7 +17,19 @@ export default function VerificationResultView({ result, isDark, actions }) {
   const field = resolveField(holder?.fieldOfStudy || holder?.program);
   const valid = credentials.filter((c) => c.signatureValid && !c.revoked);
   const anyInvalid = credentials.some((c) => !c.signatureValid);
-  const chartCreds = credentials.filter((c) => c.signatureValid);
+  const revokedCount = credentials.filter((c) => c.signatureValid && c.revoked).length;
+  const chartCreds = credentials.filter((c) => c.signatureValid && !c.revoked);
+  // Online banner: red = a signature failed; amber = revoked or nothing to show; green = all valid.
+  const tone = anyInvalid ? 'bad' : revokedCount || credentials.length === 0 ? 'caution' : 'good';
+  const banner = {
+    bad: { cls: 'bg-red-500/10 border-red-500/40', icon: <ShieldAlert className="w-5 h-5 shrink-0 text-red-600" />, title: 'Some credentials failed verification' },
+    caution: {
+      cls: 'bg-amber-500/10 border-amber-500/40',
+      icon: <ShieldAlert className="w-5 h-5 shrink-0 text-amber-600" />,
+      title: credentials.length === 0 ? 'Identity confirmed — no public credentials yet' : `${revokedCount} credential${revokedCount === 1 ? ' has' : 's have'} been revoked`
+    },
+    good: { cls: 'bg-emerald-500/10 border-emerald-500/40', icon: <ShieldCheck className="w-5 h-5 shrink-0 text-emerald-600" />, title: 'Verified against the live registry' }
+  }[tone];
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -30,13 +42,14 @@ export default function VerificationResultView({ result, isDark, actions }) {
           </div>
         </div>
       ) : (
-        <div role="status" className={`p-3.5 rounded-2xl border flex gap-3 ${anyInvalid ? 'bg-red-500/10 border-red-500/40' : 'bg-emerald-500/10 border-emerald-500/40'}`}>
-          {anyInvalid ? <ShieldAlert className="w-5 h-5 shrink-0 text-red-600" /> : <ShieldCheck className="w-5 h-5 shrink-0 text-emerald-600" />}
+        <div role="status" className={`p-3.5 rounded-2xl border flex gap-3 ${banner.cls}`}>
+          {banner.icon}
           <div className="text-xs leading-relaxed">
-            <p className="font-bold text-sm">{anyInvalid ? 'Some credentials failed verification' : 'Verified against the live ledger'}</p>
+            <p className="font-bold text-sm">{banner.title}</p>
             <p>
-              {valid.length} of {credentials.length} credential{credentials.length === 1 ? '' : 's'} valid
-              {result.latencyMs ? ` · ${result.latencyMs} ms` : ''}
+              {credentials.length === 0
+                ? 'This candidate is registered, but hasn’t shared any minted credentials.'
+                : `${valid.length} of ${credentials.length} credential${credentials.length === 1 ? '' : 's'} valid — signatures checked on this device${result.latencyMs ? ` · ${result.latencyMs} ms` : ''}.`}
             </p>
           </div>
         </div>

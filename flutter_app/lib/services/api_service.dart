@@ -13,16 +13,21 @@ class ApiResult {
   final int status;
   final Map<String, dynamic> data;
   final bool offline;
-  const ApiResult(this.status, this.data, {this.offline = false});
+  final bool timedOut;
+  const ApiResult(this.status, this.data, {this.offline = false, this.timedOut = false});
 
   bool get ok => status >= 200 && status < 300;
-  String? get error => ok ? null : (data['error']?.toString() ?? (offline ? ApiService.offlineMessage : 'Something went wrong.'));
+  String? get error => ok
+      ? null
+      : (data['error']?.toString() ??
+          (timedOut ? ApiService.timeoutMessage : offline ? ApiService.offlineMessage : 'Something went wrong. Please try again.'));
 }
 
 /// Single client for the TrustTrace API shared with the web app.
 /// Reads fall back to the Hive cache; writes require a connection.
 class ApiService {
-  static const offlineMessage = "You're offline. Connect to the TrustTrace server and try again.";
+  static const offlineMessage = "Can't reach the TrustTrace server. Check your connection (and the server address in Profile) and try again.";
+  static const timeoutMessage = 'The server took too long to respond. If it was idle it may be starting up — please try again in a moment.';
 
   // Override at build time: flutter run --dart-define=API_BASE_URL=https://your-host/api
   static const _defaultBaseUrl = String.fromEnvironment('API_BASE_URL', defaultValue: 'http://localhost:3001/api');
@@ -39,6 +44,7 @@ class ApiService {
   static const MethodChannel _filePickerChannel = MethodChannel('trusttrace/file_picker');
 
   static const _kBaseUrl = 'api_base_url';
+  static const _kBaseUrlBuild = 'api_base_url_build_default';
   static const _kToken = 'session_token';
   static const _kRefresh = 'session_refresh_token';
   static const _kUser = 'session_user';
@@ -58,7 +64,21 @@ class ApiService {
   // ---------------------------------------------------------------------------
   static Future<void> init() async {
     await LocalStore.init();
-    apiBaseUrl = LocalStore.getString(_kBaseUrl) ?? _defaultBaseUrl;
+    // A server address typed into the app wins, but only for the build it was
+    // typed in. A new `flutter run --dart-define=API_BASE_URL=…` (say, after the
+    // Mac's Wi-Fi address changed) must not be silently overridden by an old
+    // address — that left the app showing cached data and Google sign-in
+    // without its settings.
+    final saved = LocalStore.getString(_kBaseUrl);
+    if (saved != null && LocalStore.getString(_kBaseUrlBuild) == _defaultBaseUrl) {
+      apiBaseUrl = saved;
+    } else {
+      apiBaseUrl = _defaultBaseUrl;
+      if (saved != null) {
+        await LocalStore.setString(_kBaseUrl, null);
+        await LocalStore.setString(_kBaseUrlBuild, null);
+      }
+    }
     _token = LocalStore.getString(_kToken);
     _refreshToken = LocalStore.getString(_kRefresh);
     developerTokenNotifier.value = LocalStore.getString(_kDevToken);
@@ -82,6 +102,7 @@ class ApiService {
     if (!clean.endsWith('/api')) clean = '$clean/api';
     apiBaseUrl = clean;
     await LocalStore.setString(_kBaseUrl, clean);
+    await LocalStore.setString(_kBaseUrlBuild, _defaultBaseUrl);
   }
 
   static Future<void> _saveSession(String? token, Map<String, dynamic>? user, {String? refreshToken}) async {
@@ -225,6 +246,8 @@ class ApiService {
         if (decoded is Map) data = Map<String, dynamic>.from(decoded);
       } catch (_) {}
       return ApiResult(res.statusCode, data);
+    } on TimeoutException {
+      return const ApiResult(0, {}, offline: true, timedOut: true);
     } catch (_) {
       serverConnectedNotifier.value = false;
       return const ApiResult(0, {}, offline: true);
@@ -251,7 +274,7 @@ class ApiService {
   // ---------------------------------------------------------------------------
   static Future<Map<String, dynamic>> providers() async {
     final res = await _request('GET', '/auth/providers', timeout: const Duration(seconds: 5));
-    return res.ok ? res.data : {'google': {'enabled': false}, 'apple': {'enabled': false}, 'demoLogin': false};
+    return res.ok ? res.data : {'google': {'enabled': false}, 'apple': {'enabled': false}, 'demoLogin': false, 'unreachable': true};
   }
 
   static Future<ApiResult> login(String email, String password) =>
@@ -284,6 +307,19 @@ class ApiService {
 
   static Future<ApiResult> oauthSignIn(String provider, String idToken, Map<String, dynamic> extras) =>
       _authCall('/auth/oauth/$provider', {...extras, 'idToken': idToken});
+
+  /// Links Google/Apple to the signed-in account (proves ownership of both).
+  static Future<ApiResult> linkProvider(String provider, String idToken) async {
+    final res = await _request('POST', '/auth/link/$provider', body: {'idToken': idToken});
+    if (res.ok && res.data['user'] is Map) await _saveSession(_token, Map<String, dynamic>.from(res.data['user'] as Map));
+    return res;
+  }
+
+  static Future<ApiResult> unlinkProvider(String provider) async {
+    final res = await _request('DELETE', '/auth/link/$provider');
+    if (res.ok && res.data['user'] is Map) await _saveSession(_token, Map<String, dynamic>.from(res.data['user'] as Map));
+    return res;
+  }
 
   static Future<ApiResult> recoverWallet(String input) => _authCall('/wallet/recover', {'recoveryInput': input});
 

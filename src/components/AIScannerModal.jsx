@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   X, Upload, Camera, ShieldCheck, ShieldAlert, Loader2, AlertCircle, RotateCcw, Lock, CheckCircle2, XCircle,
-  Clock, FileText, Sun, Focus, Layers, Sparkles, ChevronDown, AlertTriangle, ExternalLink, ArrowRight, Globe2
+  Clock, FileText, Sun, Focus, Layers, Sparkles, ChevronDown, AlertTriangle, ExternalLink, ArrowRight, Globe2, HelpCircle
 } from 'lucide-react';
 import { analyzeImageDataUrl } from '../../shared/documentGeometry.js';
 import { axisNames, resolveField } from '../../shared/skillTaxonomy.js';
@@ -11,7 +11,7 @@ import { CATEGORY_OPTIONS, categoryStyle } from './CredentialTags.jsx';
 const ACCEPT = 'image/png,image/jpeg,image/webp,application/pdf';
 const MAX_BYTES = 15 * 1024 * 1024;
 const STEPS = ['Upload', 'Verify', 'Details'];
-const GATE_NAMES = ['Document layout', 'Recipient identity', 'AI template check', 'Issuer & event', 'File metadata', 'Tamper forensics'];
+const GATE_NAMES = ['Image quality', 'Document layout', 'Recipient identity', 'AI template check', 'Issuer & event', 'File metadata', 'Tamper forensics', 'Consistency & registry'];
 
 const TIPS = [
   { icon: Layers, text: 'Flat, well-lit surface' },
@@ -22,6 +22,7 @@ const TIPS = [
 const OUTCOME = {
   verified: { icon: ShieldCheck, title: 'Certificate verified', tone: 'emerald', cls: 'bg-emerald-500/5 border-emerald-500/30', text: 'text-emerald-800 dark:text-emerald-300', badge: 'bg-emerald-600' },
   review: { icon: AlertTriangle, title: 'Needs a registrar check', tone: 'amber', cls: 'bg-amber-500/5 border-amber-500/40', text: 'text-amber-800 dark:text-amber-300', badge: 'bg-amber-500' },
+  inconclusive: { icon: HelpCircle, title: 'Unable to verify automatically', tone: 'slate', cls: 'bg-slate-500/5 border-slate-400/50', text: 'text-slate-700 dark:text-slate-300', badge: 'bg-slate-500' },
   rejected: { icon: ShieldAlert, title: 'Certificate rejected', tone: 'red', cls: 'bg-red-600/5 border-red-500/50', text: 'text-red-700 dark:text-red-300', badge: 'bg-red-600' }
 };
 
@@ -30,6 +31,7 @@ function GateIcon({ status }) {
   if (status === 'waiting') return <span className="w-4 h-4 rounded-full border-2 border-[#E0DFDC] dark:border-[#30363D] shrink-0" />;
   if (status === 'warn') return <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />;
   if (status === 'fail') return <XCircle className="w-4 h-4 text-red-600 shrink-0" />;
+  if (status === 'inconclusive') return <HelpCircle className="w-4 h-4 text-slate-500 shrink-0" />;
   return <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />;
 }
 
@@ -83,8 +85,8 @@ export default function AIScannerModal({ isOpen, onClose, currentUser, onCredent
   const axes = axisNames(field.id);
   const forensics = scan?.forensics;
   const outcome = forensics?.outcome || (forensics?.passed ? 'verified' : 'rejected');
-  const look = OUTCOME[outcome];
-  const forcedReview = outcome === 'review';
+  const look = OUTCOME[outcome] || OUTCOME.review;
+  const forcedReview = outcome === 'review' || outcome === 'inconclusive';
   const stepIndex = step === 'upload' ? 0 : step === 'details' ? 2 : 1;
 
   const reset = () => {
@@ -119,14 +121,15 @@ export default function AIScannerModal({ isOpen, onClose, currentUser, onCredent
 
       const data = await apiJson('/api/certificates/verify-upload', {
         method: 'POST',
-        body: { fileBase64: dataUrl, fileName: picked.name, mimeType: picked.type, clientPixelMetrics: geometry }
+        timeoutMs: 120000,
+        body: { fileBase64: dataUrl, fileName: picked.name, mimeType: picked.type || (/\.pdf$/i.test(picked.name) ? 'application/pdf' : 'image/jpeg'), clientPixelMetrics: geometry }
       });
       const x = data.extracted || {};
       setScan(data);
       setForm({
         achievementTitle: x.achievementTitle || '',
         issuingOrganization: x.issuingOrganization || currentUser?.university || '',
-        issuanceDate: x.issuanceDate || new Date().toISOString().slice(0, 10),
+        issuanceDate: x.issuanceDate || '',
         competencyDomain: axes.includes(x.competencyDomain) ? x.competencyDomain : axes[0],
         achievementType: CATEGORY_OPTIONS.includes(x.achievementType) ? x.achievementType : 'Other',
         requiresScoring: Boolean(x.requiresScoring),
@@ -159,11 +162,15 @@ export default function AIScannerModal({ isOpen, onClose, currentUser, onCredent
     try {
       const data = await apiJson('/api/credentials/issue', {
         method: 'POST',
-        body: { ...form, scanId: scan.scanId, validationMode: sendToQueue || forcedReview ? 'queue' : 'auto' }
+        body: { ...form, scanToken: scan.scanToken || scan.scanId, validationMode: sendToQueue || forcedReview ? 'queue' : 'auto' }
       });
       onCredentialIssued?.(data.credential, data.message);
       close();
     } catch (err) {
+      // An old scan can't be issued; start again from the upload step.
+      if (err.data?.code === 'SCAN_EXPIRED') {
+        reset();
+      }
       setError(err.message);
     } finally {
       setSubmitting(false);
@@ -199,7 +206,7 @@ export default function AIScannerModal({ isOpen, onClose, currentUser, onCredent
           <GateIcon status={g.status || (g.passed ? 'pass' : 'fail')} />
           <span className="min-w-0">
             <span className="font-semibold">{g.title.replace(/^Gate \d: /, '')}</span>
-            {(g.status !== 'pass' || g.gateNumber === 2 || g.gateNumber === 4 || g.gateNumber === 6) && (
+            {(g.status !== 'pass' || g.alwaysShowDetail) && (
               <span className="block text-[11px] text-[#666666] dark:text-[#8B949E] leading-snug">{g.detail}</span>
             )}
           </span>
@@ -227,11 +234,27 @@ export default function AIScannerModal({ isOpen, onClose, currentUser, onCredent
       </div>
       <p className="mt-1 text-xs text-[#666666] dark:text-[#8B949E]">
         {outcome === 'verified'
-          ? 'Passed all six checks.'
+          ? `No problems found in ${gates.length} checks.`
           : outcome === 'review'
-          ? 'We found signs the certificate may have been edited. You can still submit it — a registrar will review it before it is minted.'
+          ? 'Something needs a closer look (see below). You can still submit it — a registrar will review it before it is minted.'
+          : outcome === 'inconclusive'
+          ? 'Some checks could not run (see below), so we can’t confirm it automatically. You can submit it for a registrar to review, or try a sharper photo or the original PDF.'
           : 'This file can’t be added to your wallet.'}
       </p>
+      {outcome !== 'verified' && (
+        <ul className="mt-2 space-y-1">
+          {gates
+            .filter((g) => g.status !== 'pass')
+            .map((g) => (
+              <li key={g.id} className="text-xs flex gap-1.5">
+                <GateIcon status={g.status} />
+                <span>
+                  <b>{g.statusLabel}:</b> {g.detail}
+                </span>
+              </li>
+            ))}
+        </ul>
+      )}
     </div>
   );
 
@@ -334,7 +357,7 @@ export default function AIScannerModal({ isOpen, onClose, currentUser, onCredent
                 <button type="button" onClick={() => setShowGates((v) => !v)} className="w-full p-3 flex items-center justify-between gap-2 text-left">
                   <span className={`flex items-center gap-2 text-xs font-bold ${look.text}`}>
                     <look.icon className="w-4 h-4" />
-                    {outcome === 'verified' ? 'Verified — all 6 checks passed' : look.title}
+                    {outcome === 'verified' ? `Verified — no problems in ${gates.length} checks` : look.title}
                   </span>
                   <ChevronDown className={`w-4 h-4 text-[#666666] transition-transform ${showGates ? 'rotate-180' : ''}`} />
                 </button>
@@ -398,6 +421,9 @@ export default function AIScannerModal({ isOpen, onClose, currentUser, onCredent
                       Date {auto.issuanceDate && <AutoBadge />}
                     </label>
                     <input type="date" required value={form.issuanceDate} onChange={(e) => set('issuanceDate', e.target.value)} className="linkedin-input" />
+                    {!scan?.extracted?.detected?.date && !form.issuanceDate && (
+                      <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">No date could be read — enter the date printed on the certificate.</p>
+                    )}
                   </div>
                 </div>
 

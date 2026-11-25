@@ -54,8 +54,7 @@ class _CaptureInstructions extends StatelessWidget {
               const SizedBox(height: 28),
               const Text('Before you scan', textAlign: TextAlign.center, style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, letterSpacing: -0.3)),
               const SizedBox(height: 6),
-              Text('A clear photo lets us read and verify your certificate automatically.',
-                  textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: hint, height: 1.35)),
+              Text('A clear photo lets us read and verify your certificate automatically.', textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: hint, height: 1.35)),
               const SizedBox(height: 24),
               const _Tip(icon: Icons.crop_landscape_rounded, title: 'Flat and well-lit', body: 'Place the certificate on a flat surface in good light.'),
               const _Tip(icon: Icons.wb_sunny_outlined, title: 'No glare or shadows', body: 'Avoid reflections from lamps and keep your shadow off the page.'),
@@ -176,6 +175,46 @@ class _DocumentCameraState extends State<_DocumentCamera> with WidgetsBindingObs
     super.dispose();
   }
 
+  static const _native = MethodChannel('trusttrace/file_picker');
+
+  /// How the screen is shown right now. The camera plugin turns both the
+  /// preview and the photo to whatever orientation it is locked to, so it must
+  /// follow the screen: an iPad (or a rotated iPhone) may be in landscape, and
+  /// a portrait lock would then show the scene sideways and crop the wrong area.
+  Future<DeviceOrientation> _screenOrientation() async {
+    try {
+      switch (await _native.invokeMethod<String>('interfaceOrientation')) {
+        case 'landscapeLeft':
+          return DeviceOrientation.landscapeLeft;
+        case 'landscapeRight':
+          return DeviceOrientation.landscapeRight;
+        case 'portraitDown':
+          return DeviceOrientation.portraitDown;
+        case 'portraitUp':
+          return DeviceOrientation.portraitUp;
+      }
+    } catch (_) {}
+    return DeviceOrientation.portraitUp;
+  }
+
+  Future<void> _lockToScreen(CameraController c) async {
+    final o = await _screenOrientation();
+    if (!mounted || !c.value.isInitialized || c.value.lockedCaptureOrientation == o) return;
+    await c.lockCaptureOrientation(o).catchError((_) {});
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeMetrics() {
+    // The screen rotated (or the iPad window was resized). iOS reports the new
+    // orientation once the rotation settles.
+    final c = _controller;
+    if (c == null) return;
+    Future.delayed(const Duration(milliseconds: 350), () {
+      if (identical(c, _controller)) _lockToScreen(c);
+    });
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final c = _controller;
@@ -194,7 +233,7 @@ class _DocumentCameraState extends State<_DocumentCamera> with WidgetsBindingObs
       final back = cameras.firstWhere((c) => c.lensDirection == CameraLensDirection.back, orElse: () => cameras.first);
       final controller = CameraController(back, ResolutionPreset.max, enableAudio: false, imageFormatGroup: ImageFormatGroup.jpeg);
       await controller.initialize();
-      await controller.lockCaptureOrientation(DeviceOrientation.portraitUp);
+      await controller.lockCaptureOrientation(await _screenOrientation());
       await controller.setFlashMode(FlashMode.off);
       if (!mounted) return controller.dispose();
       setState(() {
@@ -210,9 +249,26 @@ class _DocumentCameraState extends State<_DocumentCamera> with WidgetsBindingObs
     }
   }
 
+  /// Safe-area insets from the last build, so a capture crops exactly the
+  /// frame that was on screen.
+  EdgeInsets _safe = EdgeInsets.zero;
+
   /// The guide rectangle in screen coordinates.
   Rect _guide(Size size) {
     final ratio = _landscapeDoc ? 1 / 1.414 : 1.414; // height / width
+    if (size.width > size.height) {
+      // Screen held sideways: the shutter sits in a column on the right, so the
+      // frame uses the band between the prompt and the bottom edge.
+      final top = _safe.top + 100;
+      final bottom = size.height - _safe.bottom - 24;
+      var w = size.width - 2 * (_safe.right + 140);
+      var h = w * ratio;
+      if (h > bottom - top) {
+        h = bottom - top;
+        w = h / ratio;
+      }
+      return Rect.fromCenter(center: Offset(size.width / 2, (top + bottom) / 2), width: w, height: h);
+    }
     var w = size.width * 0.88;
     var h = w * ratio;
     final maxH = size.height * 0.62;
@@ -256,6 +312,8 @@ class _DocumentCameraState extends State<_DocumentCamera> with WidgetsBindingObs
       backgroundColor: Colors.black,
       body: LayoutBuilder(builder: (context, box) {
         final screen = Size(box.maxWidth, box.maxHeight);
+        _safe = MediaQuery.paddingOf(context);
+        final sideways = screen.width > screen.height;
         final guide = _guide(screen);
         return Stack(fit: StackFit.expand, children: [
           if (c != null && c.value.isInitialized)
@@ -269,9 +327,10 @@ class _DocumentCameraState extends State<_DocumentCamera> with WidgetsBindingObs
                 child: FittedBox(
                   fit: BoxFit.cover,
                   child: SizedBox(
-                    // The plugin reports a landscape aspect ratio; the UI is portrait.
+                    // The plugin reports a landscape aspect ratio (wider than
+                    // tall); the preview is turned to match the screen.
                     width: screen.width,
-                    height: screen.width * c.value.aspectRatio,
+                    height: screen.width > screen.height ? screen.width / c.value.aspectRatio : screen.width * c.value.aspectRatio,
                     child: CameraPreview(c),
                   ),
                 ),
@@ -291,24 +350,32 @@ class _DocumentCameraState extends State<_DocumentCamera> with WidgetsBindingObs
           IgnorePointer(
             child: CustomPaint(painter: _CornerPainter(color: Colors.white, length: 30, stroke: 4, radius: 16, rect: guide)),
           ),
-          // Top bar
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              child: Row(children: [
-                IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close_rounded, color: Colors.white)),
-                const Spacer(),
-                IconButton(
-                  tooltip: _torch ? 'Turn off light' : 'Turn on light',
-                  onPressed: c == null
-                      ? null
-                      : () async {
-                          setState(() => _torch = !_torch);
-                          await c.setFlashMode(_torch ? FlashMode.torch : FlashMode.off).catchError((_) {});
-                        },
-                  icon: Icon(_torch ? Icons.flash_on_rounded : Icons.flash_off_rounded, color: Colors.white),
-                ),
-              ]),
+          // Top bar. Positioned so it stays at the top: as a plain child of the
+          // full-screen Stack the row was centred vertically, which in
+          // landscape put the light button against the shutter.
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                child: Row(children: [
+                  IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close_rounded, color: Colors.white)),
+                  const Spacer(),
+                  IconButton(
+                    tooltip: _torch ? 'Turn off light' : 'Turn on light',
+                    onPressed: c == null
+                        ? null
+                        : () async {
+                            setState(() => _torch = !_torch);
+                            await c.setFlashMode(_torch ? FlashMode.torch : FlashMode.off).catchError((_) {});
+                          },
+                    icon: Icon(_torch ? Icons.flash_on_rounded : Icons.flash_off_rounded, color: Colors.white),
+                  ),
+                ]),
+              ),
             ),
           ),
           // Prompt above the frame
@@ -320,53 +387,75 @@ class _DocumentCameraState extends State<_DocumentCamera> with WidgetsBindingObs
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                 decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.55), borderRadius: BorderRadius.circular(20)),
-                child: const Text('Align the certificate inside the frame',
-                    textAlign: TextAlign.center, style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13.5)),
+                child: const Text('Align the certificate inside the frame', textAlign: TextAlign.center, style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13.5)),
               ),
             ),
           ),
-          // Bottom controls
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: SafeArea(
-              top: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(28, 0, 28, 24),
-                child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                  _RoundButton(
-                    icon: _landscapeDoc ? Icons.crop_portrait_rounded : Icons.crop_landscape_rounded,
-                    label: _landscapeDoc ? 'Portrait' : 'Landscape',
-                    onTap: () => setState(() => _landscapeDoc = !_landscapeDoc),
-                  ),
-                  Semantics(
-                    button: true,
-                    label: 'Take photo',
-                    child: GestureDetector(
-                      onTap: c == null || _busy ? null : () => _capture(screen),
-                      child: Container(
-                        width: 78,
-                        height: 78,
-                        padding: const EdgeInsets.all(5),
-                        decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 4)),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 150),
-                          decoration: BoxDecoration(shape: BoxShape.circle, color: _busy ? Colors.white38 : Colors.white),
-                          child: _busy ? const Padding(padding: EdgeInsets.all(18), child: CircularProgressIndicator(strokeWidth: 3)) : null,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 64),
-                ]),
+          // Controls: a bottom row when upright, a right-hand column when sideways
+          // (like the Camera app) so they never cover the frame.
+          if (sideways)
+            Positioned(
+              top: 0,
+              bottom: 0,
+              right: 0,
+              child: SafeArea(
+                left: false,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 28),
+                  child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    _shutter(c, screen),
+                    const SizedBox(height: 28),
+                    _docToggle(),
+                  ]),
+                ),
+              ),
+            )
+          else
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(28, 0, 28, 24),
+                  child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                    _docToggle(),
+                    _shutter(c, screen),
+                    const SizedBox(width: 64),
+                  ]),
+                ),
               ),
             ),
-          ),
         ]);
       }),
     );
   }
+
+  Widget _docToggle() => _RoundButton(
+        icon: _landscapeDoc ? Icons.crop_portrait_rounded : Icons.crop_landscape_rounded,
+        label: _landscapeDoc ? 'Portrait' : 'Landscape',
+        onTap: () => setState(() => _landscapeDoc = !_landscapeDoc),
+      );
+
+  Widget _shutter(CameraController? c, Size screen) => Semantics(
+        button: true,
+        label: 'Take photo',
+        child: GestureDetector(
+          onTap: c == null || _busy ? null : () => _capture(screen),
+          child: Container(
+            width: 78,
+            height: 78,
+            padding: const EdgeInsets.all(5),
+            decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 4)),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              decoration: BoxDecoration(shape: BoxShape.circle, color: _busy ? Colors.white38 : Colors.white),
+              child: _busy ? const Padding(padding: EdgeInsets.all(18), child: CircularProgressIndicator(strokeWidth: 3)) : null,
+            ),
+          ),
+        ),
+      );
 }
 
 class _RoundButton extends StatelessWidget {
@@ -514,8 +603,7 @@ class _CaptureReview extends StatelessWidget {
           if (!doc.looksGood)
             const Padding(
               padding: EdgeInsets.fromLTRB(24, 12, 24, 0),
-              child: Text('A retake usually gives a faster, more reliable verification.',
-                  textAlign: TextAlign.center, style: TextStyle(color: Colors.white70, fontSize: 12.5)),
+              child: Text('A retake usually gives a faster, more reliable verification.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white70, fontSize: 12.5)),
             ),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
@@ -616,5 +704,4 @@ CapturedDocument _processCapture(_CropRequest r) {
 
 /// Exposed for tests: runs the crop/quality pipeline on raw JPEG bytes.
 @visibleForTesting
-CapturedDocument processCaptureForTest(Uint8List bytes, Size screen, Rect guide) =>
-    _processCapture(_CropRequest(bytes, screen.width, screen.height, guide.left, guide.top, guide.width, guide.height));
+CapturedDocument processCaptureForTest(Uint8List bytes, Size screen, Rect guide) => _processCapture(_CropRequest(bytes, screen.width, screen.height, guide.left, guide.top, guide.width, guide.height));

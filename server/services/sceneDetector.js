@@ -225,6 +225,11 @@ export async function detectScene({ buffer, layout, visionSaysScene = null, clie
     if (visionSaysScene && framed && text.reliable && Math.abs(text.tilt) >= 3) {
       return result('possible', 'The vision model and the text angle suggest a photographed or mocked-up certificate.');
     }
+    // Every line consistently tilted: a photo taken at an angle, even when the
+    // sheet's edges are hidden by a dark frame or swooshes. Digital files have level text.
+    if (text.reliable && Math.abs(text.tilt) >= 4 && text.spread <= 1.5) {
+      return result('possible', `The certificate was photographed at an angle (text tilted ${Math.abs(text.tilt).toFixed(0)}°).`);
+    }
     const shaped = framed && g.maxSkew >= 0.08 && !cleanQuad;
     return result('flat', shaped ? 'Flat document — slanted shapes are part of the certificate design.' : 'Flat document layout confirmed.');
   }

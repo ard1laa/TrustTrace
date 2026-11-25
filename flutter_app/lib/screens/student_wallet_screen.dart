@@ -44,7 +44,7 @@ class StudentWalletScreen extends StatelessWidget {
     return RefreshIndicator(
       onRefresh: onRefresh,
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 12, 14, 32),
+        padding: pagePadding(context),
         children: [
           Card(
             clipBehavior: Clip.antiAlias,
@@ -265,7 +265,7 @@ class _UploadSheet extends StatefulWidget {
   State<_UploadSheet> createState() => _UploadSheetState();
 }
 
-const _gateNames = ['Document layout', 'Recipient identity', 'AI template check', 'Issuer & event', 'File metadata', 'Tamper forensics'];
+const _gateNames = ['Image quality', 'Document layout', 'Recipient identity', 'AI template check', 'Issuer & event', 'File metadata', 'Tamper forensics', 'Consistency & registry'];
 
 class _UploadSheetState extends State<_UploadSheet> {
   String _stage = 'pick'; // pick | scanning | results | details
@@ -286,6 +286,8 @@ class _UploadSheetState extends State<_UploadSheet> {
   String _category = 'Other';
   bool _scoring = false;
   DateTime _date = DateTime.now();
+  // False when the scan couldn't read a date: the student must pick it.
+  bool _dateSet = true;
   final Set<String> _auto = {};
 
   @override
@@ -365,15 +367,17 @@ class _UploadSheetState extends State<_UploadSheet> {
       _result.text = '${x['achievementResult'] ?? ''}';
       _scoring = x['requiresScoring'] == true;
       _category = kCategories.contains(x['achievementType']) ? x['achievementType'] as String : 'Other';
-      _date = DateTime.tryParse('${x['issuanceDate']}') ?? DateTime.now();
+      final readDate = DateTime.tryParse('${x['issuanceDate'] ?? ''}');
+      _date = readDate ?? DateTime.now();
+      _dateSet = readDate != null;
       final suggested = '${x['competencyDomain'] ?? ''}';
       if (widget.field.axisNames.contains(suggested)) _axis = suggested;
       _auto
         ..clear()
         ..addAll([
           if (_title.text.isNotEmpty) 'title',
-          if (x['issuingOrganization'] != null) 'org',
-          if (x['issuanceDate'] != null) 'date',
+          if ('${x['issuingOrganization'] ?? ''}'.isNotEmpty) 'org',
+          if (readDate != null) 'date',
           if (_category != 'Other') 'category',
           if (_scoring) 'scoring',
         ]);
@@ -383,13 +387,17 @@ class _UploadSheetState extends State<_UploadSheet> {
   }
 
   Future<void> _submit() async {
-    final forced = _scan?['forensics']?['outcome'] == 'review';
+    final forced = ['review', 'inconclusive'].contains(_scan?['forensics']?['outcome']);
+    if (!_dateSet) {
+      setState(() => _error = 'Enter the date printed on the certificate.');
+      return;
+    }
     setState(() {
       _submitting = true;
       _error = null;
     });
     final res = await ApiService.issueCredential({
-      'scanId': _scan!['scanId'],
+      'scanToken': _scan!['scanToken'] ?? _scan!['scanId'],
       'achievementTitle': _title.text.trim(),
       'issuingOrganization': _org.text.trim(),
       'issuanceDate': _date.toIso8601String().substring(0, 10),
@@ -402,7 +410,11 @@ class _UploadSheetState extends State<_UploadSheet> {
     if (!mounted) return;
     setState(() => _submitting = false);
     if (!res.ok) {
-      setState(() => _error = res.error);
+      setState(() {
+        _error = res.error;
+        // An old scan can't be issued; start again from the upload step.
+        if (res.data['code'] == 'SCAN_EXPIRED') _stage = 'pick';
+      });
       return;
     }
     final messenger = ScaffoldMessenger.of(context);
@@ -544,12 +556,18 @@ class _UploadSheetState extends State<_UploadSheet> {
   }
 
   (String, Color, IconData, String) _outcomeLook(String outcome) => switch (outcome) {
-        'verified' => ('Verified — all 6 checks passed', TrustTraceTheme.successGreen, Icons.verified_user_rounded, 'Passed all six checks.'),
+        'verified' => ('Verified — no problems found', TrustTraceTheme.successGreen, Icons.verified_user_rounded, 'Every check ran and found nothing wrong.'),
         'review' => (
             'Needs a registrar check',
             TrustTraceTheme.warningAmber,
             Icons.policy_outlined,
-            'We found signs the certificate may have been edited. You can still submit it — a registrar will review it first.'
+            'Something needs a closer look (see below). You can still submit it — a registrar will review it first.'
+          ),
+        'inconclusive' => (
+            'Unable to verify automatically',
+            const Color(0xFF64748B),
+            Icons.help_outline_rounded,
+            'Some checks couldn’t run (see below). Submit it for a registrar to review, or try a sharper photo or the original PDF.'
           ),
         _ => ('Certificate rejected', TrustTraceTheme.dangerRed, Icons.gpp_bad_outlined, 'This file can’t be added to your wallet.'),
       };
@@ -564,12 +582,14 @@ class _UploadSheetState extends State<_UploadSheet> {
               switch ('${g['status'] ?? (g['passed'] == true ? 'pass' : 'fail')}') {
                 'pass' => Icons.check_circle_rounded,
                 'warn' => Icons.error_rounded,
+                'inconclusive' => Icons.help_rounded,
                 _ => Icons.cancel_rounded,
               },
               size: 17,
               color: switch ('${g['status'] ?? (g['passed'] == true ? 'pass' : 'fail')}') {
                 'pass' => TrustTraceTheme.successGreen,
                 'warn' => TrustTraceTheme.warningAmber,
+                'inconclusive' => const Color(0xFF64748B),
                 _ => TrustTraceTheme.dangerRed,
               },
             ),
@@ -577,7 +597,7 @@ class _UploadSheetState extends State<_UploadSheet> {
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Text('${g['title']}'.replaceFirst(RegExp(r'^Gate \d: '), ''), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
-                if (g['status'] != 'pass' || [2, 4, 6].contains(g['gateNumber']))
+                if (g['status'] != 'pass' || g['alwaysShowDetail'] == true)
                   Text('${g['detail']}', style: TextStyle(fontSize: 11.5, color: Theme.of(context).hintColor, height: 1.3)),
               ]),
             ),
@@ -652,7 +672,7 @@ class _UploadSheetState extends State<_UploadSheet> {
   Widget _detailsStage(BuildContext context) {
     final forensics = Map<String, dynamic>.from(_scan?['forensics'] ?? {});
     final outcome = '${forensics['outcome'] ?? 'verified'}';
-    final forced = outcome == 'review';
+    final forced = outcome == 'review' || outcome == 'inconclusive';
     final (title, color, icon, _) = _outcomeLook(outcome);
     final gates = (forensics['gates'] as List? ?? const []).map((g) => Map<String, dynamic>.from(g as Map)).toList();
     final hint = Theme.of(context).hintColor;
@@ -720,15 +740,22 @@ class _UploadSheetState extends State<_UploadSheet> {
           if (picked != null) {
             setState(() {
               _date = picked;
+              _dateSet = true;
               _auto.remove('date');
             });
           }
         },
         child: InputDecorator(
           decoration: dec.copyWith(suffixIcon: const Icon(Icons.calendar_today_outlined, size: 18)),
-          child: Text(MaterialLocalizations.of(context).formatMediumDate(_date)),
+          child: Text(_dateSet ? MaterialLocalizations.of(context).formatMediumDate(_date) : 'Choose the date on the certificate',
+              style: _dateSet ? null : TextStyle(color: hint)),
         ),
       ),
+      if (!_dateSet)
+        const Padding(
+          padding: EdgeInsets.only(top: 4, left: 2),
+          child: Text('No date could be read from the certificate.', style: TextStyle(fontSize: 11.5, color: TrustTraceTheme.warningAmber)),
+        ),
       const SizedBox(height: 14),
       Container(
         padding: const EdgeInsets.fromLTRB(12, 4, 6, 4),

@@ -1,6 +1,6 @@
 {
   "name": "trusttrace-web3-credentials",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "TrustTrace: blockchain-anchored micro-credentials with skill visualizations.",
   "type": "module",
   "scripts": {
@@ -13,7 +13,11 @@
     "db:reset": "node -e \"import('./server/db/adapter.js').then(async ({db})=>{await db.init();await db.resetToInitialState();console.log('Database reset to a clean state.');process.exit(0)})\"",
     "test:flutter": "cd flutter_app && flutter test",
     "gen:taxonomy": "node scripts/gen-taxonomy-dart.mjs",
-    "build:ocr": "swiftc -O server/ocr/vision_layout.swift -o server/ocr/vision_layout"
+    "build:ocr": "swiftc -O server/ocr/vision_layout.swift -o server/ocr/vision_layout",
+    "test": "node --test tests/*.test.mjs",
+    "test:api": "node --test tests/api.test.mjs",
+    "eval:scanner": "node scripts/scanner-eval/run.mjs",
+    "eval:scanner:generate": "node scripts/scanner-eval/generate.mjs"
   },
   "dependencies": {
     "chart.js": "^4.4.6",

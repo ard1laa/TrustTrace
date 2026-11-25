@@ -22,7 +22,12 @@ class VerificationResultView extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _Banner(outcome: outcome, validCount: validCount, total: creds.length),
+        _Banner(
+          outcome: outcome,
+          validCount: validCount,
+          total: creds.length,
+          revoked: creds.where((c) => c['signatureValid'] == true && c['revoked'] == true).length,
+        ),
         const SizedBox(height: 12),
         Card(
           child: Padding(
@@ -78,13 +83,15 @@ class _Banner extends StatelessWidget {
   final VerificationOutcome outcome;
   final int validCount;
   final int total;
-  const _Banner({required this.outcome, required this.validCount, required this.total});
+  final int revoked;
+  const _Banner({required this.outcome, required this.validCount, required this.total, this.revoked = 0});
 
   @override
   Widget build(BuildContext context) {
     final offline = outcome.offline;
     final bad = outcome.anyInvalid;
-    final color = offline ? TrustTraceTheme.warningAmber : (bad ? TrustTraceTheme.dangerRed : TrustTraceTheme.successGreen);
+    final caution = !bad && (revoked > 0 || total == 0);
+    final color = offline || caution ? TrustTraceTheme.warningAmber : (bad ? TrustTraceTheme.dangerRed : TrustTraceTheme.successGreen);
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -95,7 +102,7 @@ class _Banner extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(offline ? Icons.wifi_off_rounded : (bad ? Icons.gpp_bad_outlined : Icons.verified_user), color: color),
+          Icon(offline ? Icons.wifi_off_rounded : (bad || caution ? Icons.gpp_maybe_outlined : Icons.verified_user), color: color),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -106,14 +113,20 @@ class _Banner extends StatelessWidget {
                       ? 'Verified Offline (Live revocation status unavailable)'
                       : bad
                           ? 'Some credentials failed verification'
-                          : 'Verified against the live ledger',
+                          : total == 0
+                              ? 'Identity confirmed — no public credentials yet'
+                              : revoked > 0
+                                  ? '$revoked credential${revoked == 1 ? ' has' : 's have'} been revoked'
+                                  : 'Verified against the live registry',
                   style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: color),
                 ),
                 const SizedBox(height: 3),
                 Text(
                   offline
                       ? 'Signatures were checked on this device with the registrar\'s cached public key. Reconnect to confirm none have been revoked.'
-                      : '$validCount of $total credential${total == 1 ? '' : 's'} valid.',
+                      : total == 0
+                          ? 'This candidate is registered but hasn\'t shared any minted credentials.'
+                          : '$validCount of $total credential${total == 1 ? '' : 's'} valid — signatures checked on this device.',
                   style: const TextStyle(fontSize: 12, height: 1.35),
                 ),
               ],

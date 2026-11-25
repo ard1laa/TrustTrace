@@ -7,3 +7,9 @@ dist/
 .cert/
 # Local runtime data (user accounts, credentials). Never commit.
 server/data/
+# Scanner evaluation: generated synthetic samples, reports and your private real samples
+test-data/scanner/generated/
+test-data/scanner/report.json
+test-data/scanner/real/*
+!test-data/scanner/real/README.md
+!test-data/scanner/real/manifest.example.json

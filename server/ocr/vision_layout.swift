@@ -53,43 +53,51 @@ func makeRequest(_ level: VNRequestTextRecognitionLevel) -> VNRecognizeTextReque
   return request
 }
 
-// Some macOS releases ship a broken "accurate" model (e5rtError). Fall back to
-// the fast recogniser, which still gives line boxes and angles. The server
-// remembers the result and passes TT_VISION_LEVEL=fast to skip the slow failure.
+func linesOf(_ request: VNRecognizeTextRequest) -> [[String: Any]] {
+  var lines: [[String: Any]] = []
+  for obs in request.results ?? [] {
+    guard let candidate = obs.topCandidates(1).first else { continue }
+    let text = candidate.string
+    var words: [[String: Any]] = []
+    text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byWords) { word, range, _, _ in
+      guard let word = word, let box = try? candidate.boundingBox(for: range) else { return }
+      words.append(["text": word, "box": topLeft(box.boundingBox)])
+    }
+    lines.append([
+      "text": text,
+      "confidence": Double(candidate.confidence),
+      "box": topLeft(obs.boundingBox),
+      "quad": [point(obs.topLeft), point(obs.topRight), point(obs.bottomRight), point(obs.bottomLeft)],
+      "words": words
+    ])
+  }
+  return lines
+}
+
+// Some macOS releases ship an unreliable "accurate" model: it can fail outright
+// (e5rtError) or silently drop lines. The fast recogniser is cheap and always
+// works, so run both; the server merges them (accurate first, fast fills gaps).
+// TT_VISION_LEVEL=fast skips the accurate pass.
 let preferFast = ProcessInfo.processInfo.environment["TT_VISION_LEVEL"] == "fast"
-var level = preferFast ? "fast" : "accurate"
-var request = makeRequest(preferFast ? .fast : .accurate)
+let handler = VNImageRequestHandler(cgImage: image, options: [:])
+let fast = makeRequest(.fast)
 do {
-  try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+  try handler.perform([fast])
 } catch {
-  if preferFast { fail("vision failed: \(error)") }
-  level = "fast"
-  request = makeRequest(.fast)
-  do {
-    try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-  } catch {
-    fail("vision failed: \(error)")
+  fail("vision failed: \(error)")
+}
+let fastLines = linesOf(fast)
+var accurateLines: [[String: Any]]? = nil
+if !preferFast {
+  let accurate = makeRequest(.accurate)
+  if (try? handler.perform([accurate])) != nil {
+    accurateLines = linesOf(accurate)
   }
 }
+let level = accurateLines == nil ? "fast" : "accurate"
+let lines = accurateLines ?? fastLines
 
-var lines: [[String: Any]] = []
-for obs in request.results ?? [] {
-  guard let candidate = obs.topCandidates(1).first else { continue }
-  let text = candidate.string
-  var words: [[String: Any]] = []
-  text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byWords) { word, range, _, _ in
-    guard let word = word, let box = try? candidate.boundingBox(for: range) else { return }
-    words.append(["text": word, "box": topLeft(box.boundingBox)])
-  }
-  lines.append([
-    "text": text,
-    "confidence": Double(candidate.confidence),
-    "box": topLeft(obs.boundingBox),
-    "quad": [point(obs.topLeft), point(obs.topRight), point(obs.bottomRight), point(obs.bottomLeft)],
-    "words": words
-  ])
-}
 
-let out: [String: Any] = ["width": image.width, "height": image.height, "level": level, "lines": lines]
+let out: [String: Any] = ["width": image.width, "height": image.height, "level": level, "lines": lines, "fastLines": accurateLines == nil ? [] : fastLines]
 let data = try! JSONSerialization.data(withJSONObject: out, options: [])
 FileHandle.standardOutput.write(data)

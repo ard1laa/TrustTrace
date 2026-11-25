@@ -14,10 +14,11 @@ import 'package:trusttrace_mobile/screens/qr_verifier_screen.dart';
 import 'package:trusttrace_mobile/screens/student_wallet_screen.dart';
 import 'package:trusttrace_mobile/services/verification_service.dart';
 import 'package:trusttrace_mobile/theme/trusttrace_theme.dart';
+import 'package:trusttrace_mobile/widgets/common.dart';
 import 'package:trusttrace_mobile/widgets/verification_result_view.dart';
 
-// Renders each main screen on small iPhones in both themes; any RenderFlex
-// overflow fails the test.
+// Renders each main screen on iPhones and iPads (portrait and landscape) in
+// both themes; any RenderFlex overflow fails the test.
 void main() {
   final users = jsonDecode(File('test/fixtures/users.json').readAsStringSync()) as Map<String, dynamic>;
   final key = publicKeyFromDidDocument(jsonDecode(File('test/fixtures/did.json').readAsStringSync())['didDocument']);
@@ -25,7 +26,12 @@ void main() {
   final creds = (users['credentials'] as List).map((c) => Map<String, dynamic>.from(c as Map)).toList();
   final recruiter = {'id': 'r1', 'name': 'Alex Morgan', 'role': 'recruiter', 'jobTitle': 'Senior Talent Acquisition Partner', 'companyName': 'Global Tech Corporation International'};
 
-  const sizes = [Size(320, 568), Size(375, 667), Size(390, 844)];
+  const sizes = [
+    Size(320, 568), Size(375, 667), Size(390, 844), // iPhone SE 1st gen, SE 2/3, 13/14
+    Size(744, 1133), // iPad mini, portrait
+    Size(820, 1180), Size(1180, 820), // iPad Air 11", portrait and landscape
+    Size(1376, 1032), // iPad Pro 13", landscape
+  ];
 
   Future<void> pump(WidgetTester tester, Size size, ThemeData theme, Widget child) async {
     tester.view.physicalSize = size * 3;
@@ -212,6 +218,41 @@ void main() {
       }
     }
   }
+
+  for (final size in const [Size(1180, 820), Size(820, 1180)]) {
+    testWidgets('iPad ${size.width.toInt()}x${size.height.toInt()}: cards form a centred column; the list still spans the screen', (t) async {
+      await pump(t, size, TrustTraceTheme.lightTheme, StudentWalletScreen(student: student, credentials: creds, offline: true, onRefresh: () async {}));
+      expect(t.getRect(find.byType(ListView).first).width, size.width);
+      final card = t.getRect(find.byType(Card).first);
+      expect(card.width, lessThanOrEqualTo(kMaxContentWidth));
+      expect(card.width, greaterThan(kMaxContentWidth - 20));
+      expect(card.center.dx, closeTo(size.width / 2, 1));
+    });
+  }
+
+  testWidgets('iPhone: page padding is unchanged', (t) async {
+    await pump(t, const Size(390, 844), TrustTraceTheme.lightTheme, StudentWalletScreen(student: student, credentials: creds, offline: true, onRefresh: () async {}));
+    expect(t.getRect(find.byType(Card).first).left, lessThanOrEqualTo(14 + 4)); // 14 padding + card margin
+  });
+
+  test('landscape camera capture (iPad held sideways) is cropped to the guide', () {
+    // A 1600×1200 landscape "photo" with the page in the middle, shown on a
+    // 1180×820 landscape screen (scale 0.7375, 1180×885 cover-fit, 32.5 cropped top/bottom).
+    final photo = img.Image(width: 1600, height: 1200);
+    img.fill(photo, color: img.ColorRgb8(60, 50, 40));
+    img.fillRect(photo, x1: 400, y1: 200, x2: 1200, y2: 1000, color: img.ColorRgb8(235, 232, 225));
+    for (var y = 260; y < 960; y += 40) {
+      img.fillRect(photo, x1: 460, y1: y, x2: 1140, y2: y + 12, color: img.ColorRgb8(20, 20, 20));
+    }
+    final jpeg = Uint8List.fromList(img.encodeJpg(photo, quality: 90));
+    const screen = Size(1180, 820);
+    // Guide over the page: photo x 400..1200, y 200..1000 → screen x 295..885, y 115..705.
+    const guide = Rect.fromLTRB(295, 115, 885, 705);
+    final doc = processCaptureForTest(jpeg, screen, guide);
+    expect(doc.width, closeTo(832, 30));
+    expect(doc.height, closeTo(832, 30));
+    expect(doc.isBlurry, isFalse);
+  });
 
   test('camera capture is cropped to the guide and quality-checked', () {
     // A 1200×1600 "photo": dark desk with a white page carrying sharp text-like bars.

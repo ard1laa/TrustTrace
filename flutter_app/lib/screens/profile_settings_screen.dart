@@ -1,8 +1,10 @@
+import 'dart:io' show Platform;
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import '../core/skill_taxonomy.dart';
 import '../services/api_service.dart';
+import '../services/social_auth.dart';
 import '../theme/trusttrace_theme.dart';
 import '../widgets/common.dart';
 import 'auth_screen.dart';
@@ -28,6 +30,23 @@ class _ProfileSettingsScreenState extends State<ProfileSettingsScreen> {
   final _newPw = TextEditingController();
   late String? _field = SkillTaxonomy.forUser(widget.user).id;
   String _busy = '';
+  Map<String, dynamic> _providers = const {};
+
+  @override
+  void initState() {
+    super.initState();
+    ApiService.providers().then((p) {
+      if (mounted) setState(() => _providers = p);
+    });
+  }
+
+  Future<void> _link(String provider) async {
+    final r = provider == 'google' ? await SocialAuth.google(_providers) : await SocialAuth.apple();
+    if (!mounted) return;
+    if (r.error != null) return showToast(context, r.error!, error: true);
+    if (r.token == null) return;
+    await _call('link-$provider', () => ApiService.linkProvider(provider, r.token!), 'Linked.');
+  }
 
   bool get _isStudent => widget.user['role'] == 'student';
   bool get _hasPassword => widget.user['hasPassword'] != false;
@@ -91,7 +110,7 @@ class _ProfileSettingsScreenState extends State<ProfileSettingsScreen> {
     final user = widget.user;
     final emailChanged = _email.text.trim().toLowerCase() != '${user['email']}'.toLowerCase();
     return ListView(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 32),
+      padding: pagePadding(context),
       children: [
         Card(
           child: Padding(
@@ -200,9 +219,26 @@ class _ProfileSettingsScreenState extends State<ProfileSettingsScreen> {
               ),
             ]),
             const SizedBox(height: 10),
-            Wrap(spacing: 6, runSpacing: 6, children: [
+            const Text('Sign-in methods', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13.5)),
+            const SizedBox(height: 6),
+            Wrap(spacing: 6, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
               if (_hasPassword) const Pill('Email & password', color: Colors.grey),
-              for (final p in (user['linkedProviders'] as List? ?? const [])) Pill('$p'.toUpperCase(), color: TrustTraceTheme.linkedInBlue),
+              for (final p in (user['linkedProviders'] as List? ?? const []))
+                InputChip(
+                  label: Text('$p'[0].toUpperCase() + '$p'.substring(1)),
+                  onDeleted: _busy.isNotEmpty ? null : () => _call('unlink-$p', () => ApiService.unlinkProvider('$p'), 'Unlinked.'),
+                  deleteButtonTooltipMessage: 'Unlink',
+                ),
+            ]),
+            const SizedBox(height: 8),
+            Wrap(spacing: 8, runSpacing: 8, children: [
+              for (final p in ['google', if (Platform.isIOS || Platform.isMacOS) 'apple'])
+                if (_providers[p]?['enabled'] == true && !(user['linkedProviders'] as List? ?? const []).contains(p))
+                  OutlinedButton.icon(
+                    onPressed: _busy.isNotEmpty ? null : () => _link(p),
+                    icon: Icon(p == 'google' ? Icons.g_mobiledata_rounded : Icons.apple, size: 22),
+                    label: Text('Link ${p == 'google' ? 'Google' : 'Apple'}'),
+                  ),
             ]),
           ]),
         ),

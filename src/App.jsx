@@ -12,6 +12,7 @@ import QRCodeModal from './components/QRCodeModal.jsx';
 import TransferRevertModal from './components/TransferRevertModal.jsx';
 import CryptographicProofModal from './components/CryptographicProofModal.jsx';
 import ProfileSettingsModal from './components/ProfileSettingsModal.jsx';
+import ErrorBoundary from './components/ErrorBoundary.jsx';
 import { apiFetch, apiJson, setSession, endSession, getSavedUser, getToken } from './lib/api.js';
 import { saveSnapshot, loadSnapshot, clearSnapshots } from './lib/offlineStore.js';
 import { cacheIssuerDid } from './lib/verification.js';
@@ -120,6 +121,9 @@ export default function App() {
   const fetchAllData = useCallback(async () => {
     try {
       const [statusRes, usersRes] = await Promise.all([apiFetch('/api/status'), apiFetch('/api/users')]);
+      // The server answered, so live data is showing (navigator.onLine alone
+      // stays true on Wi-Fi that can't actually reach the server).
+      setOnline(true);
       if (!statusRes.ok || !usersRes.ok) return;
       const [statusData, usersData] = await Promise.all([statusRes.json(), usersRes.json()]);
       applyData(usersData, statusData);
@@ -139,8 +143,9 @@ export default function App() {
         }
       }
       saveSnapshot('dashboard', { usersData, statusData: { ...statusData, soliditySource: '' } });
-    } catch {
-      // Offline: keep showing the last snapshot.
+    } catch (err) {
+      // Server unreachable: keep showing the last snapshot, and say so.
+      if (err?.offline) setOnline(false);
     }
   }, [applyData]);
 
@@ -336,7 +341,10 @@ export default function App() {
 
       {!online && (
         <div className="bg-amber-500/15 text-amber-900 dark:text-amber-200 text-xs font-medium px-4 py-2 flex items-center justify-center gap-2 border-b border-amber-500/30">
-          <WifiOff className="w-3.5 h-3.5" /> You're offline — showing saved data. QR codes can still be verified.
+          <WifiOff className="w-3.5 h-3.5 shrink-0" />
+          <span>
+            Can’t reach the TrustTrace server — showing your last saved data. Uploading, issuing and live revocation checks need a connection; Offline QR codes can still be checked.
+          </span>
         </div>
       )}
       {toastEl}
@@ -400,53 +408,63 @@ export default function App() {
         )}
       </main>
 
-      <AIScannerModal
-        isOpen={scannerOpen}
-        onClose={() => setScannerOpen(false)}
-        currentUser={currentUser}
-        onCredentialIssued={async (_cred, msg) => {
-          await fetchAllData();
-          showToast(msg);
-        }}
-      />
+      <ErrorBoundary variant="modal" name="Certificate upload" open={scannerOpen} resetKey={scannerOpen} onClose={() => setScannerOpen(false)}>
+        <AIScannerModal
+          isOpen={scannerOpen}
+          onClose={() => setScannerOpen(false)}
+          currentUser={currentUser}
+          onCredentialIssued={async (_cred, msg) => {
+            await fetchAllData();
+            showToast(msg);
+          }}
+        />
+      </ErrorBoundary>
 
-      <QRCodeModal
-        isOpen={qrTarget.open}
-        onClose={() => setQrTarget({ open: false, credential: null })}
-        credential={qrTarget.credential}
-        student={currentUser}
-        credentials={credentials}
-      />
+      <ErrorBoundary variant="modal" name="Portfolio QR" open={qrTarget.open} resetKey={qrTarget.open} onClose={() => setQrTarget({ open: false, credential: null })}>
+        <QRCodeModal
+          isOpen={qrTarget.open}
+          onClose={() => setQrTarget({ open: false, credential: null })}
+          credential={qrTarget.credential}
+          student={currentUser}
+          credentials={credentials}
+        />
+      </ErrorBoundary>
 
-      <CryptographicProofModal
-        isOpen={proofTarget.open}
-        onClose={() => setProofTarget({ open: false, credential: null })}
-        credential={proofTarget.credential}
-        onOpenTransferModal={(cred) => setTransferTarget({ open: true, credential: cred })}
-      />
+      <ErrorBoundary variant="modal" name="Credential proof" open={proofTarget.open} resetKey={proofTarget.open} onClose={() => setProofTarget({ open: false, credential: null })}>
+        <CryptographicProofModal
+          isOpen={proofTarget.open}
+          onClose={() => setProofTarget({ open: false, credential: null })}
+          credential={proofTarget.credential}
+          onOpenTransferModal={(cred) => setTransferTarget({ open: true, credential: cred })}
+        />
+      </ErrorBoundary>
 
-      <TransferRevertModal
-        isOpen={transferTarget.open}
-        onClose={() => setTransferTarget({ open: false, credential: null })}
-        credential={transferTarget.credential}
-        onTransferAttemptLogged={fetchAllData}
-      />
+      <ErrorBoundary variant="modal" name="Transfer check" open={transferTarget.open} resetKey={transferTarget.open} onClose={() => setTransferTarget({ open: false, credential: null })}>
+        <TransferRevertModal
+          isOpen={transferTarget.open}
+          onClose={() => setTransferTarget({ open: false, credential: null })}
+          credential={transferTarget.credential}
+          onTransferAttemptLogged={fetchAllData}
+        />
+      </ErrorBoundary>
 
-      <ProfileSettingsModal
-        isOpen={profileModal.open}
-        onClose={() => setProfileModal((m) => ({ ...m, open: false }))}
-        initialTab={profileModal.tab}
-        currentUser={currentUser}
-        customLogoUrl={customLogoUrl}
-        setCustomLogoUrl={setCustomLogoUrl}
-        onUserUpdated={(user, token) => {
-          setSession(token || getToken(), user);
-          setCurrentUser(user);
-          fetchAllData();
-        }}
-        onAccountDeleted={(data) => logout(data.message)}
-        onNotify={showToast}
-      />
+      <ErrorBoundary variant="modal" name="Profile & settings" open={profileModal.open} resetKey={profileModal.open} onClose={() => setProfileModal((m) => ({ ...m, open: false }))}>
+        <ProfileSettingsModal
+          isOpen={profileModal.open}
+          onClose={() => setProfileModal((m) => ({ ...m, open: false }))}
+          initialTab={profileModal.tab}
+          currentUser={currentUser}
+          customLogoUrl={customLogoUrl}
+          setCustomLogoUrl={setCustomLogoUrl}
+          onUserUpdated={(user, token) => {
+            setSession(token || getToken(), user);
+            setCurrentUser(user);
+            fetchAllData();
+          }}
+          onAccountDeleted={(data) => logout(data.message)}
+          onNotify={showToast}
+        />
+      </ErrorBoundary>
     </div>
   );
 }

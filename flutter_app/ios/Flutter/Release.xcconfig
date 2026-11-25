@@ -1,2 +1,13 @@
 #include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"
 #include "Generated.xcconfig"
+
+// Google Sign-In URL scheme (the iOS client ID, reversed). Placeholder until
+// you create ios/Flutter/GoogleSignIn.xcconfig — see docs/SOCIAL_SIGN_IN.md.
+GOOGLE_REVERSED_CLIENT_ID = com.googleusercontent.apps.not-configured
+#include? "GoogleSignIn.xcconfig"
+
+// Simulators on Apple Silicon run arm64 only (iOS 26+ simulators can't use the
+// x86_64/Rosetta slice). Skipping it also avoids a Flutter ≤3.49 build step that
+// fails on Xcode 27 ("does not contain architectures \"arm64 x86_64\""). Set ARCHS
+// itself (not EXCLUDED_ARCHS): Flutter's scheme pre-action reads the raw ARCHS.
+ARCHS[sdk=iphonesimulator*] = arm64

@@ -39,10 +39,15 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
     target.build_configurations.each do |config|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '17.0'
-      # Fix nanopb / framework header include errors
-      config.build_settings['CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER'] = 'NO'
+      # Xcode's module verifier (Release/Archive only) re-checks each plugin
+      # framework in isolation, without Flutter on its search path, so
+      # sign_in_with_apple fails with "'Flutter/Flutter.h' file not found" even
+      # though it compiles fine. The verifier is a packaging lint for library
+      # authors; the app's own code and compiler warnings are unaffected.
+      config.build_settings['ENABLE_MODULE_VERIFIER'] = 'NO'
     end
   end
 end

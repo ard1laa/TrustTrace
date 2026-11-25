@@ -1,16 +1,17 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+import '../services/social_auth.dart';
 import '../core/email_domains.dart';
 import '../services/api_service.dart';
 import '../theme/trusttrace_theme.dart';
 import '../widgets/common.dart';
 import 'document_camera_screen.dart';
 
-const kAppVersion = '2.2.0';
+const kAppVersion = '2.3.0';
 
 Future<void> showServerConnectionDialog(BuildContext context, {VoidCallback? onSaved}) async {
   final ctrl = TextEditingController(text: ApiService.apiBaseUrl);
@@ -64,7 +65,9 @@ Future<void> showServerConnectionDialog(BuildContext context, {VoidCallback? onS
 
 class AuthScreen extends StatefulWidget {
   final void Function(Map<String, dynamic> user, String? message) onAuthenticated;
-  const AuthScreen({super.key, required this.onAuthenticated});
+  /// Tests only: skip the network call for /auth/providers.
+  final Map<String, dynamic>? providersForTest;
+  const AuthScreen({super.key, required this.onAuthenticated, this.providersForTest});
 
   @override
   State<AuthScreen> createState() => _AuthScreenState();
@@ -96,6 +99,9 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _devOpen = ApiService.developerTokenNotifier.value != null;
   int _taps = 0;
   DateTime _lastTap = DateTime(2000);
+  // A Google/Apple identity waiting for the rest of sign-up.
+  ({String provider, String idToken})? _pendingSocial;
+  String? _notice;
 
   final _name = TextEditingController();
   final _email = TextEditingController();
@@ -112,20 +118,39 @@ class _AuthScreenState extends State<AuthScreen> {
   EmailInfo get _emailInfo => classifyEmail(_email.text, _role);
   bool get _needsProof => _role != 'student' && !_emailInfo.institutional;
 
+  Timer? _providersRetry;
+  bool _loadingProviders = false;
+
   @override
   void initState() {
     super.initState();
     _loadProviders();
+    ApiService.serverConnectedNotifier.addListener(_onServerConnection);
     _email.addListener(() => setState(() {}));
   }
 
+  /// The Google/Apple buttons depend on the server's settings. On a first
+  /// launch the request can fail while iOS is still asking for Local Network
+  /// access (or the server is starting), so keep retrying until it answers.
   Future<void> _loadProviders() async {
-    final p = await ApiService.providers();
-    if (mounted) setState(() => _providers = p);
+    if (_loadingProviders) return;
+    _loadingProviders = true;
+    _providersRetry?.cancel();
+    final p = widget.providersForTest ?? await ApiService.providers();
+    _loadingProviders = false;
+    if (!mounted) return;
+    setState(() => _providers = p);
+    if (p['unreachable'] == true) _providersRetry = Timer(const Duration(seconds: 5), _loadProviders);
+  }
+
+  void _onServerConnection() {
+    if (ApiService.serverConnectedNotifier.value && _providers['unreachable'] == true) _loadProviders();
   }
 
   @override
   void dispose() {
+    _providersRetry?.cancel();
+    ApiService.serverConnectedNotifier.removeListener(_onServerConnection);
     for (final c in [_name, _email, _password, _university, _studentId, _company, _jobTitle, _companyRegId, _department]) {
       c.dispose();
     }
@@ -167,7 +192,7 @@ class _AuthScreenState extends State<AuthScreen> {
         if (_name.text.trim().isEmpty) return 'Enter your full name.';
         if (_emailInfo.kind == EmailKind.invalid) return 'Enter a valid email address.';
         if (_emailInfo.kind == EmailKind.disposable) return 'Disposable email addresses are not accepted.';
-        if (_password.text.length < 8) return 'Use at least 8 characters for your password.';
+        if (_pendingSocial == null && _password.text.length < 8) return 'Use at least 8 characters for your password.';
       case 'Your studies':
         if (_field == null) return 'Choose your programme.';
         if (_university.text.trim().isEmpty) return 'Enter your university.';
@@ -196,6 +221,11 @@ class _AuthScreenState extends State<AuthScreen> {
         _step++;
       });
     }
+    final pending = _pendingSocial;
+    if (pending != null) {
+      _completeSocialSignup(pending.provider, pending.idToken);
+      return;
+    }
     _run('form', () => ApiService.register({..._profileFields, 'email': _email.text.trim(), 'password': _password.text}));
   }
 
@@ -203,6 +233,8 @@ class _AuthScreenState extends State<AuthScreen> {
         _isRegister = !_isRegister;
         _step = 0;
         _error = null;
+        _notice = null;
+        _pendingSocial = null;
       });
 
   // Hidden developer gesture: 7 quick taps (or long-presses) on the version label.
@@ -217,33 +249,79 @@ class _AuthScreenState extends State<AuthScreen> {
     }
   }
 
-  Future<void> _google() async {
-    final cfg = Map<String, dynamic>.from(_providers['google'] ?? {});
-    try {
-      final account = await GoogleSignIn(
-        clientId: Platform.isIOS ? cfg['iosClientId']?.toString() : null,
-        serverClientId: cfg['webClientId']?.toString(),
-        scopes: const ['email', 'profile'],
-      ).signIn();
-      final idToken = (await account?.authentication)?.idToken;
-      if (idToken == null) return;
-      await _run('google', () => ApiService.oauthSignIn('google', idToken, {..._profileFields, 'name': account?.displayName ?? _name.text.trim()}));
-    } catch (e) {
-      setState(() => _error = 'Google sign-in failed. Check that this app is registered with your Google client ID.');
+  String _label(String provider) => provider == 'google' ? 'Google' : 'Apple';
+
+  // First contact with a Google/Apple identity: sign in, or start sign-up.
+  Future<void> _handleProviderToken(String provider, String idToken, String name) async {
+    if (_isRegister && _pendingSocial != null && _lastStep) return _completeSocialSignup(provider, idToken);
+    setState(() {
+      _loading = provider;
+      _error = null;
+      _notice = null;
+    });
+    final res = await ApiService.oauthSignIn(provider, idToken, {if (name.isNotEmpty) 'name': name});
+    if (!mounted) return;
+    setState(() => _loading = '');
+    if (res.ok && res.data['needsOnboarding'] == true) {
+      final profile = Map<String, dynamic>.from(res.data['profile'] ?? {});
+      setState(() {
+        _pendingSocial = (provider: provider, idToken: idToken);
+        _email.text = '${profile['email'] ?? ''}';
+        if (_name.text.trim().isEmpty) _name.text = '${profile['name'] ?? name}';
+        _password.clear();
+        _isRegister = true;
+        _step = 0;
+        _notice = 'Signing up with ${_label(provider)} as ${_email.text}. Choose your account type, then complete your details.';
+      });
+      return;
+    }
+    if (res.ok && ApiService.currentUser != null) {
+      widget.onAuthenticated(ApiService.currentUser!, res.data['message']?.toString());
+      return;
+    }
+    setState(() {
+      if (res.data['code'] == 'LINK_REQUIRED') {
+        _isRegister = false;
+        _email.text = '${res.data['email'] ?? _email.text}';
+        _password.clear();
+      }
+      _error = res.error;
+    });
+  }
+
+  Future<void> _completeSocialSignup(String provider, String idToken) async {
+    final res = await _runResult(provider, () => ApiService.oauthSignIn(provider, idToken, {..._profileFields, 'signup': true}));
+    if (res != null && !res.ok && mounted && '${res.data['error'] ?? ''}'.toLowerCase().contains('expired')) {
+      setState(() => _error =
+          'Your ${_label(provider)} sign-in timed out while you filled in the form. Go back to the first step and choose ${_label(provider)} again — your answers are kept.');
     }
   }
 
-  Future<void> _apple() async {
-    try {
-      final cred = await SignInWithApple.getAppleIDCredential(scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName]);
-      final token = cred.identityToken;
-      if (token == null) return;
-      final name = [cred.givenName, cred.familyName].whereType<String>().join(' ');
-      await _run('apple', () => ApiService.oauthSignIn('apple', token, {..._profileFields, if (name.isNotEmpty) 'name': name}));
-    } on SignInWithAppleAuthorizationException catch (e) {
-      if (e.code != AuthorizationErrorCode.canceled) setState(() => _error = 'Apple sign-in failed.');
+  Future<ApiResult?> _runResult(String key, Future<ApiResult> Function() call) async {
+    setState(() {
+      _loading = key;
+      _error = null;
+    });
+    final res = await call();
+    if (!mounted) return null;
+    setState(() => _loading = '');
+    if (res.ok && ApiService.currentUser != null) {
+      widget.onAuthenticated(ApiService.currentUser!, res.data['message']?.toString());
+    } else {
+      setState(() => _error = res.error);
     }
+    return res;
   }
+
+  Future<void> _social(Future<SocialToken> Function() get) async {
+    final r = await get();
+    if (!mounted) return;
+    if (r.error != null) return setState(() => _error = r.error);
+    if (r.token != null) await _handleProviderToken(r.provider, r.token!, r.name);
+  }
+
+  Future<void> _google() => _social(() => SocialAuth.google(_providers));
+  Future<void> _apple() => _social(SocialAuth.apple);
 
   Future<void> _attachProof(String source) async {
     if (source == 'camera') {
@@ -323,6 +401,8 @@ class _AuthScreenState extends State<AuthScreen> {
                         duration: const Duration(milliseconds: 200),
                         child: _error == null ? const SizedBox(width: double.infinity) : _errorBox(),
                       ),
+                      if (_notice != null && _isRegister && _pendingSocial != null) _noticeBox(),
+                      if (!_isRegister) ...[_socialButtons(context, dividerLabel: 'or sign in with email', dividerBelow: true), const SizedBox(height: 4)],
                       AnimatedSwitcher(
                         duration: const Duration(milliseconds: 220),
                         child: KeyedSubtree(
@@ -332,7 +412,8 @@ class _AuthScreenState extends State<AuthScreen> {
                       ),
                       const SizedBox(height: 18),
                       _actions(),
-                      if (!_isRegister || _lastStep) _socialButtons(context),
+                      if (_isRegister && _step == 0 && (_pendingSocial == null || (_error ?? '').contains('timed out')))
+                        _socialButtons(context, dividerLabel: 'or sign up faster with', signup: true),
                       const SizedBox(height: 8),
                       Wrap(
                         alignment: WrapAlignment.center,
@@ -474,13 +555,24 @@ class _AuthScreenState extends State<AuthScreen> {
           const SizedBox(height: 12),
           TextField(
             controller: _email,
+            readOnly: _pendingSocial != null,
             keyboardType: TextInputType.emailAddress,
             autocorrect: false,
             autofillHints: const [AutofillHints.email],
             decoration: _dec(_role == 'recruiter' ? 'Work email' : _role == 'admin' ? 'University email' : 'Email', helper: emailHelper),
           ),
           const SizedBox(height: 12),
-          _passwordField(),
+          if (_pendingSocial == null)
+            _passwordField()
+          else
+            Row(children: [
+              const Icon(Icons.verified_rounded, size: 16, color: TrustTraceTheme.successGreen),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text('Verified by ${_label(_pendingSocial!.provider)} — no password needed.',
+                    style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor)),
+              ),
+            ]),
         ]);
       case 'Your studies':
         return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -603,39 +695,90 @@ class _AuthScreenState extends State<AuthScreen> {
     ]);
   }
 
-  Widget _socialButtons(BuildContext context) {
+  Widget _noticeBox() => Container(
+        margin: const EdgeInsets.only(bottom: 14),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: TrustTraceTheme.linkedInBlue.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: TrustTraceTheme.linkedInBlue.withValues(alpha: 0.25)),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(_notice!, style: const TextStyle(fontSize: 12.5, height: 1.35)),
+          TextButton(
+            style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: const Size(0, 32)),
+            onPressed: () => setState(() {
+              _pendingSocial = null;
+              _notice = null;
+              _email.clear();
+            }),
+            child: const Text('Use email instead', style: TextStyle(fontWeight: FontWeight.w800)),
+          ),
+        ]),
+      );
+
+  // Google / Apple. Unconfigured providers are hidden in production; on a
+  // development server they show disabled with the setting to add.
+  Widget _socialButtons(BuildContext context, {required String dividerLabel, bool dividerBelow = false, bool signup = false}) {
     final busy = _loading.isNotEmpty;
+    final hints = _providers['setupHints'] == true;
+    final appleAvailable = Platform.isIOS || Platform.isMacOS;
     final googleOn = _providers['google']?['enabled'] == true;
-    final appleOn = _providers['apple']?['enabled'] == true && (Platform.isIOS || Platform.isMacOS);
-    if (!googleOn && !appleOn) return const SizedBox.shrink();
-    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      const SizedBox(height: 14),
-      Row(children: [
+    final appleOn = _providers['apple']?['enabled'] == true && appleAvailable;
+    final showGoogle = googleOn || hints;
+    final showApple = appleOn || (hints && appleAvailable);
+    if (!showGoogle && !showApple) return const SizedBox.shrink();
+    final verb = signup ? 'Sign up with' : 'Continue with';
+    final hint = Theme.of(context).hintColor;
+    final missing = [if (showGoogle && !googleOn) 'GOOGLE_CLIENT_ID + GOOGLE_IOS_CLIENT_ID', if (showApple && !appleOn) 'APPLE_BUNDLE_ID'];
+
+    final divider = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(children: [
         const Expanded(child: Divider()),
-        Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Text('or', style: TextStyle(color: Theme.of(context).hintColor))),
+        Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Text(dividerLabel, style: TextStyle(color: hint, fontSize: 12))),
         const Expanded(child: Divider()),
       ]),
-      const SizedBox(height: 12),
-      if (googleOn)
+    );
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      if (!dividerBelow) divider,
+      if (showGoogle)
         OutlinedButton.icon(
-          onPressed: busy ? null : _google,
+          onPressed: busy || !googleOn ? null : _google,
           style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(46), shape: const StadiumBorder()),
           icon: _loading == 'google'
               ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-              : const Text('G', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 17, color: Color(0xFF4285F4))),
-          label: const Text('Continue with Google', style: TextStyle(fontWeight: FontWeight.w700)),
+              : Text('G', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 17, color: googleOn ? const Color(0xFF4285F4) : hint)),
+          label: Text('$verb Google', style: const TextStyle(fontWeight: FontWeight.w700)),
         ),
-      if (googleOn && appleOn) const SizedBox(height: 10),
-      if (appleOn)
-        SizedBox(
-          height: 46,
-          child: SignInWithAppleButton(
-            onPressed: busy ? () {} : _apple,
-            text: 'Continue with Apple',
-            borderRadius: const BorderRadius.all(Radius.circular(23)),
-            style: Theme.of(context).brightness == Brightness.dark ? SignInWithAppleButtonStyle.white : SignInWithAppleButtonStyle.black,
+      if (showGoogle && showApple) const SizedBox(height: 10),
+      if (showApple)
+        appleOn
+            ? SizedBox(
+                height: 46,
+                child: SignInWithAppleButton(
+                  onPressed: busy ? () {} : _apple,
+                  text: '$verb Apple',
+                  borderRadius: const BorderRadius.all(Radius.circular(23)),
+                  style: Theme.of(context).brightness == Brightness.dark ? SignInWithAppleButtonStyle.white : SignInWithAppleButtonStyle.black,
+                ),
+              )
+            : OutlinedButton.icon(
+                onPressed: null,
+                style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(46), shape: const StadiumBorder()),
+                icon: const Icon(Icons.apple, size: 20),
+                label: Text('$verb Apple', style: const TextStyle(fontWeight: FontWeight.w700)),
+              ),
+      if (missing.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Text(
+            'Developer note: not set up on this server yet — add ${missing.join(' and ')} to .env and restart (docs/SOCIAL_SIGN_IN.md). Hidden in production until configured.',
+            style: TextStyle(fontSize: 11, color: hint, height: 1.3),
           ),
         ),
+      if (dividerBelow) divider,
     ]);
   }
 }

@@ -1,5 +1,5 @@
 import { apiFetch } from '../lib/api.js';
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Briefcase,
   ShieldCheck,
@@ -15,7 +15,8 @@ import {
   GraduationCap,
   SlidersHorizontal,
   ArrowUpRight,
-  XCircle
+  XCircle,
+  Loader2
 } from 'lucide-react';
 import LiveQRScanner, { decodeQrFromImageFile } from '../components/LiveQRScanner.jsx';
 import D3CompetencyGraph from '../components/D3CompetencyGraph.jsx';
@@ -24,7 +25,7 @@ import VerificationResultView from '../components/VerificationResultView.jsx';
 import Avatar from '../components/Avatar.jsx';
 import { FIELDS, resolveField, axisForCredential, axisColor } from '../../shared/skillTaxonomy.js';
 import { CredentialTags } from '../components/CredentialTags.jsx';
-import { decodePortfolioText } from '../lib/portfolioQr.js';
+import { decodePortfolioText, extractShareCode } from '../lib/portfolioQr.js';
 import { verifyScannedText } from '../lib/verification.js';
 
 const fieldLabelOf = (user) => resolveField(user?.fieldOfStudy || user?.program).label;
@@ -51,6 +52,7 @@ export default function RecruiterPortal({
   const [selectedCred, setSelectedCred] = useState(initialSelectedCredential || null);
   const [handshakeInfo, setHandshakeInfo] = useState(null);
   const [scanResult, setScanResult] = useState(null);
+  const [verifyBusy, setVerifyBusy] = useState(false);
 
   // Tab 2: Private Per-Recruiter Shortlist
   const [myShortlist, setMyShortlist] = useState([]);
@@ -198,46 +200,51 @@ export default function RecruiterPortal({
     }
   };
 
+  // Every QR or link a candidate can share — short link (/v/<code>), Offline QR,
+  // or an older /verify?did= link — is verified the same way: signed
+  // credentials are checked on this device against the registrar's key, and
+  // revocation is read from the server when online.
+  const verifyingRef = useRef(false);
   const handleDecodedQrString = async (rawText) => {
-    if (!rawText) return;
-    // Portfolio QRs carry signed claims: verify locally, then upgrade to live status if online.
-    if (decodePortfolioText(rawText)) {
-      const result = await verifyScannedText(rawText);
-      if (result.error) {
-        onNotify?.(result.error);
-        return;
-      }
-      setActiveTab('verify');
-      if (result.mode === 'online' && result.holder?.id) {
-        setVerifiedStudentId(result.holder.id);
+    const text = String(rawText || '').trim();
+    if (!text || verifyingRef.current) return; // ignore repeat frames of the same code
+    const isLink = decodePortfolioText(text) || extractShareCode(text) || /^https?:\/\/.+\/verify\?/i.test(text);
+    if (isLink) {
+      verifyingRef.current = true;
+      setVerifyBusy(true);
+      try {
+        const result = await verifyScannedText(text);
+        if (result.error) {
+          onNotify?.(result.error);
+          return;
+        }
+        setActiveTab('verify');
+        setVerifiedStudentId(result.holder?.id || '');
         setSelectedCred(null);
-        setScanResult(null);
-        setHandshakeInfo({ latencyMs: result.latencyMs });
-        onNotify?.(`Verified ${result.holder.name}.`);
-      } else {
-        setVerifiedStudentId('');
+        setHandshakeInfo(result.latencyMs ? { latencyMs: result.latencyMs } : null);
         setScanResult(result);
-        onNotify?.(`Verified ${result.holder?.name} offline.`);
+        onNotify?.(`${result.mode === 'offline' ? 'Checked offline' : 'Verified'}: ${result.holder?.name || 'candidate'}.`);
+      } finally {
+        verifyingRef.current = false;
+        setVerifyBusy(false);
       }
       return;
     }
+    let parsed = null;
     try {
-      const parsed = JSON.parse(rawText);
-      if (parsed.credentialId || parsed.tokenId) {
-        runCandidateVerification({
-          credentialId: parsed.credentialId,
-          tokenId: parsed.tokenId
-        });
-        return;
-      }
-      if (parsed.studentDid || parsed.studentUserId) {
-        runCandidateVerification(parsed.studentDid || parsed.studentUserId);
-        return;
-      }
+      parsed = JSON.parse(text);
     } catch {
-      // Plain URL, DID, Student ID, or Credential ID string
-      runCandidateVerification(rawText);
+      // not JSON
     }
+    if (parsed && typeof parsed === 'object') {
+      if (parsed.credentialId || parsed.tokenId) return runCandidateVerification({ credentialId: parsed.credentialId, tokenId: parsed.tokenId });
+      if (parsed.studentDid || parsed.studentUserId) return runCandidateVerification(parsed.studentDid || parsed.studentUserId);
+      if (parsed.credentialSubject && parsed.proof) return runCandidateVerification({ rawVcJson: parsed });
+      onNotify?.("This QR code isn't a TrustTrace credential.");
+      return;
+    }
+    // Plain DID, student ID, credential ID or token number.
+    runCandidateVerification(text);
   };
 
   const handleFileVerifyUpload = async (e) => {
@@ -255,13 +262,17 @@ export default function RecruiterPortal({
         }
       };
       reader.readAsText(file);
+    } else if (/heic|heif/i.test(file.type) || /\.hei[cf]$/i.test(file.name)) {
+      onNotify?.('HEIC photos can’t be read in this browser. Take a screenshot of the QR code (PNG/JPG) and upload that instead.');
     } else if ((file.type || '').startsWith('image/')) {
       const decoded = await decodeQrFromImageFile(file);
       if (decoded) {
         handleDecodedQrString(decoded);
       } else if (onNotify) {
-        onNotify('No QR code detected in uploaded image.');
+        onNotify('No QR code found in that image. Make sure the whole code is visible, in focus and not cropped, then try again.');
       }
+    } else {
+      onNotify?.('Upload a QR code image (PNG or JPG) or a TrustTrace credential file (.json).');
     }
     if (e.target) e.target.value = '';
   };
@@ -396,14 +407,32 @@ export default function RecruiterPortal({
             onLookupCandidate={(query) => runCandidateVerification(query)}
           />
 
-          {scanResult ? (
+          {verifyBusy ? (
+            <div className="linkedin-card p-8 text-center space-y-2" aria-live="polite">
+              <Loader2 className="w-7 h-7 animate-spin text-[#0A66C2] mx-auto" />
+              <p className="text-sm font-semibold">Checking signatures…</p>
+              <p className="text-xs text-[#666666] dark:text-[#8B949E]">Downloading the signed credentials and verifying them on this device.</p>
+            </div>
+          ) : scanResult ? (
             <VerificationResultView
               result={scanResult}
               isDark={isDark}
               actions={
-                <button type="button" onClick={() => setScanResult(null)} className="linkedin-btn-neutral text-xs py-1.5 px-3">
-                  <XCircle className="w-3.5 h-3.5" /> Clear
-                </button>
+                <>
+                  {scanResult.mode === 'online' && scanResult.holder?.id && !isShortlisted && (
+                    <button type="button" onClick={() => handleSaveToShortlist(scanResult.holder.id)} className="linkedin-btn-primary text-xs py-1.5 px-3">
+                      <BookmarkPlus className="w-3.5 h-3.5" /> Save to shortlist
+                    </button>
+                  )}
+                  {scanResult.mode === 'online' && isShortlisted && (
+                    <span className="chip bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
+                      <BookmarkCheck className="w-3.5 h-3.5" /> On your shortlist
+                    </span>
+                  )}
+                  <button type="button" onClick={() => (setScanResult(null), setVerifiedStudentId(''))} className="linkedin-btn-neutral text-xs py-1.5 px-3">
+                    <XCircle className="w-3.5 h-3.5" /> Clear
+                  </button>
+                </>
               }
             />
           ) : !activeStudent ? (

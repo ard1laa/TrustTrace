@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
 import { ISSUER_DID, getIssuerDIDDocument, generateStudentWalletIdentity } from '../crypto/ecdsaEngine.js';
@@ -7,7 +8,10 @@ import { hashPassword } from '../services/auth.js';
 import { publishChange } from '../services/events.js';
 import { shareCodeFor } from '../services/shareLinks.js';
 
-const DATA_DIR = path.resolve(process.cwd(), 'server', 'data');
+// TRUSTTRACE_DATA_DIR lets tests run against a throwaway store.
+const DATA_DIR = process.env.TRUSTTRACE_DATA_DIR
+  ? path.resolve(process.env.TRUSTTRACE_DATA_DIR)
+  : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'data');
 const JSON_DB_PATH = path.join(DATA_DIR, 'trusttrace_db.json');
 const LEGACY_JSON_DB_PATH = path.join(DATA_DIR, 'trusttrace-db.json');
 const MAX_TX_LOGS = 500;

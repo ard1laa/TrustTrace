@@ -1,0 +1,10 @@
+// Copy to GoogleSignIn.xcconfig (same folder) and replace with YOUR iOS OAuth
+// client ID, reversed. Example: client ID
+//   1234567890-abcdefg.apps.googleusercontent.com
+// becomes
+//   com.googleusercontent.apps.1234567890-abcdefg
+// The ".apps.googleusercontent.com" ending moves to the FRONT; it must not also
+// stay at the end. `./start.sh check` compares this with GOOGLE_IOS_CLIENT_ID
+// in .env and tells you if they don't match.
+// This value is public (it ships inside the app), not a secret.
+GOOGLE_REVERSED_CLIENT_ID = com.googleusercontent.apps.REPLACE_ME

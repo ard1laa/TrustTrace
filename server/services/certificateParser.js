@@ -1,3 +1,6 @@
+// OCR slips that break the patterns below: "1 st Place" → "1st Place".
+export const cleanOcr = (text) => String(text || '').replace(/\b(\d{1,2})\s+(st|nd|rd|th)\b/gi, '$1$2');
+
 // Turns OCR lines into the fields of the submission form: title, issuer, date,
 // category and scoring. Works with layout boxes (font size, centring) when the
 // OCR provider has them, and falls back to reading order and keywords.
@@ -34,7 +37,7 @@ const EVENT_WORDS = [
 
 // Phrases that introduce the event or programme name on most certificates.
 const EVENT_INTRO_RE =
-  /(?:for\s+(?:participating|taking\s+part|attending|completing|winning|achieving|being|his|her|their|outstanding|excellent|successfully)[^.]*?\b(?:in|at|of|the)\b|has\s+(?:successfully\s+)?(?:completed|participated\s+in|attended|finished)|in\s+recognition\s+of[^.]*?\b(?:in|at)\b|during\s+the|at\s+the)\s*$/i;
+  /(?:for\s+(?:participating|taking\s+part|attending|completing|winning|achieving|being|his|her|their|outstanding|excellent|successfully)[^.]*?\b(?:in|at|of|the)\b|has\s+(?:successfully\s+)?(?:completed|participated\s+in|attended|finished)(?:\s+the(?:\s+(?:workshop|course|programme|program|seminar|training|bootcamp|webinar|event|following))?)?|in\s+recognition\s+of[^.]*?\b(?:in|at)\b|during\s+the|at\s+the)\s*$/i;
 
 // ---------------------------------------------------------------------------
 // Categories
@@ -168,24 +171,33 @@ function datesInLine(line) {
 }
 
 export function extractDate(lines) {
+  return extractDateLine(lines).date;
+}
+
+// The certificate date and the line it was printed on (for region forensics).
+export function extractDateLine(lines) {
   let best = null;
   lines.forEach((line, i) => {
-    const found = datesInLine(line.text);
+    const found = datesInLine(cleanOcr(line.text));
     if (!found.length) return;
     // Prefer dates labelled as the issue/event date; later lines usually hold it.
     const weight = (/\b(date|issued|held\s+on|on\b|tarikh)/i.test(line.text) ? 2 : 0) + i / Math.max(1, lines.length);
-    if (!best || weight > best.weight) best = { date: found[found.length - 1], weight };
+    if (!best || weight > best.weight) best = { date: found[found.length - 1], weight, line };
   });
-  return best?.date || '';
+  return { date: best?.date || '', line: best?.line || null };
 }
 
 // ---------------------------------------------------------------------------
 // Names, issuer, title
 // ---------------------------------------------------------------------------
+const EVENT_WORD_SET = new Set(EVENT_WORDS.filter(([, w]) => w >= 1.5).map(([word]) => word));
+
 export function looksLikePersonName(text) {
   const words = String(text || '').replace(/[.,]/g, ' ').split(/\s+/).filter(Boolean);
   if (words.length < 2 || words.length > 7) return false;
   if (words.some((w) => NON_NAME_WORDS.has(w.toLowerCase()))) return false;
+  // "Applied Machine Learning Bootcamp" is title case, but it's an event.
+  if (words.some((w) => EVENT_WORD_SET.has(w.toLowerCase().replace(/s$/, '')))) return false;
   if (/\d/.test(text)) return false;
   const letters = words.join('').replace(/[^A-Za-zÀ-ÿ'-]/g, '');
   return letters.length / words.join('').length >= 0.85;
@@ -317,9 +329,6 @@ export function titleFromFilename(fileName = '') {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
-// OCR slips that break the patterns below: "1 st Place" → "1st Place".
-const cleanOcr = (text) => String(text || '').replace(/\b(\d{1,2})\s+(st|nd|rd|th)\b/gi, '$1$2');
-
 export function parseCertificate(rawLines, { fileName = '', hints = {} } = {}) {
   const lines = rawLines.map((l) => ({ ...l, text: cleanOcr(l.text) }));
   const trigger = extractRecipientFromTrigger(lines);

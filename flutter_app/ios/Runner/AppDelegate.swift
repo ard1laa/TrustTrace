@@ -50,6 +50,15 @@ import PDFKit
           self.presentImagePicker(preferCamera: false, result: result)
         case "pickFromFiles":
           self.presentDocumentPicker(result: result)
+        case "hasUrlScheme":
+          // Google Sign-In raises an uncatchable exception when its URL scheme
+          // is missing, so Dart asks first.
+          let wanted = (call.arguments as? String ?? "").lowercased()
+          let types = Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes") as? [[String: Any]] ?? []
+          let schemes = types.flatMap { ($0["CFBundleURLSchemes"] as? [String]) ?? [] }.map { $0.lowercased() }
+          result(!wanted.isEmpty && schemes.contains(wanted))
+        case "interfaceOrientation":
+          result(self.interfaceOrientationName())
         default:
           result(FlutterMethodNotImplemented)
         }
@@ -68,6 +77,30 @@ import PDFKit
       top = presented
     }
     return top
+  }
+
+  /// How the app's window is currently shown, named like Flutter's
+  /// DeviceOrientation. The document camera locks its capture orientation to
+  /// this so the preview and photo match the screen on iPad and rotated iPhones.
+  /// UIInterfaceOrientation.landscapeLeft is the device turned to the right
+  /// (UIDeviceOrientation.landscapeRight), hence the swap below.
+  private func interfaceOrientationName() -> String {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else {
+      return "portraitUp"
+    }
+    let orientation: UIInterfaceOrientation
+    if #available(iOS 16.0, *) {
+      orientation = scene.effectiveGeometry.interfaceOrientation
+    } else {
+      orientation = scene.interfaceOrientation
+    }
+    switch orientation {
+    case .landscapeLeft: return "landscapeRight"
+    case .landscapeRight: return "landscapeLeft"
+    case .portraitUpsideDown: return "portraitDown"
+    default: return "portraitUp"
+    }
   }
 
   private func presentImagePicker(preferCamera: Bool, result: @escaping FlutterResult) {

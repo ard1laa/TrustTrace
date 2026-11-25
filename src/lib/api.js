@@ -138,7 +138,8 @@ export function refreshSession() {
       const res = await fetch('/api/auth/refresh', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(developerToken ? { 'x-developer-token': developerToken } : {}) },
-        body: JSON.stringify({ refreshToken })
+        body: JSON.stringify({ refreshToken }),
+        signal: AbortSignal.timeout ? AbortSignal.timeout(20000) : undefined
       });
       if (res.status === 401 || res.status === 403) return false;
       if (!res.ok) return null;
@@ -171,7 +172,19 @@ if (typeof window !== 'undefined') {
   });
 }
 
-function send(path, options) {
+// Requests never hang silently: a sleeping free-tier server can take ~50 s to
+// wake, and a dropped connection otherwise leaves a spinner forever.
+const DEFAULT_TIMEOUT_MS = 30000;
+
+export class NetworkError extends Error {
+  constructor(message, kind) {
+    super(message);
+    this.kind = kind; // 'timeout' | 'offline'
+    this.offline = true;
+  }
+}
+
+async function send(path, { timeoutMs = DEFAULT_TIMEOUT_MS, ...options }) {
   const headers = new Headers(options.headers || {});
   if (memoryToken) headers.set('Authorization', `Bearer ${memoryToken}`);
   else headers.delete('Authorization');
@@ -179,7 +192,25 @@ function send(path, options) {
   if (options.body && typeof options.body === 'string' && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
-  return fetch(path, { ...options, headers });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  options.signal?.addEventListener?.('abort', () => controller.abort());
+  try {
+    return await fetch(path, { ...options, headers, signal: controller.signal });
+  } catch (err) {
+    if (options.signal?.aborted) throw err;
+    if (controller.signal.aborted) {
+      throw new NetworkError('The server took too long to respond. If it was idle it may be starting up — please try again in a moment.', 'timeout');
+    }
+    throw new NetworkError(
+      typeof navigator !== 'undefined' && navigator.onLine === false
+        ? "You're offline. Reconnect and try again."
+        : "Can't reach the TrustTrace server. Check that it is running and try again.",
+      'offline'
+    );
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function isSessionExpiry(res) {
@@ -192,6 +223,9 @@ async function isSessionExpiry(res) {
 }
 
 // fetch() wrapper: attaches the session, refreshes it when needed, retries once.
+// The retry only follows a 401, which the server sends before doing any work,
+// so a retried upload or issue can never be processed twice.
+// options.timeoutMs overrides the 30 s default (long-running scans).
 export async function apiFetch(path, options = {}) {
   if (memoryToken && refreshToken && expiresSoon(memoryToken) && path !== '/api/auth/refresh') {
     const ok = await refreshSession();
@@ -208,6 +242,7 @@ export async function apiFetch(path, options = {}) {
 
 // JSON helper: returns parsed body or throws with the server's message.
 export async function apiJson(path, { method = 'GET', body, ...rest } = {}) {
+  // Network failures surface as NetworkError with a plain-English message.
   const res = await apiFetch(path, {
     method,
     body: body === undefined ? undefined : JSON.stringify(body),

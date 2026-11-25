@@ -10,12 +10,15 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
-const HELPER = path.resolve(process.cwd(), 'server', 'ocr', 'vision_layout');
-const LEGACY_HELPER = path.resolve(process.cwd(), 'server', 'crypto', 'mac_vision_ocr');
+// Resolved from this file, not the working directory, so the server works from any folder.
+const SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const HELPER = path.join(SERVER_DIR, 'ocr', 'vision_layout');
+const LEGACY_HELPER = path.join(SERVER_DIR, 'crypto', 'mac_vision_ocr');
 
 const round = (n) => Math.round(n * 10000) / 10000;
 
@@ -149,7 +152,19 @@ async function withTempFile(buffer, mimeType, fn) {
 
 // Set once the accurate recogniser is found broken on this macOS build, so
 // later uploads go straight to the fast one instead of waiting ~45 s to fail.
-let visionLevel = process.env.TT_VISION_LEVEL === 'fast' ? 'fast' : 'auto';
+// Remembered across restarts for 24 h (per macOS version), then the accurate
+// model is tried again — the failure can be transient (model still compiling).
+const LEVEL_MARKER = path.join(os.tmpdir(), 'trusttrace-vision-level.json');
+const MARKER_TTL_MS = 24 * 60 * 60 * 1000;
+function rememberedLevel() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(LEVEL_MARKER, 'utf-8'));
+    return saved.osRelease === os.release() && Date.now() - (saved.at || 0) < MARKER_TTL_MS ? saved.level : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+let visionLevel = process.env.TT_VISION_LEVEL === 'fast' ? 'fast' : process.env.TT_VISION_LEVEL === 'accurate' ? 'auto' : rememberedLevel();
 
 async function macVisionLayout(buffer, mimeType) {
   if (process.platform !== 'darwin' || !fs.existsSync(HELPER)) return null;
@@ -161,21 +176,36 @@ async function macVisionLayout(buffer, mimeType) {
     if (parsed.level === 'fast' && visionLevel !== 'fast') {
       visionLevel = 'fast';
       console.warn('[ocr] Apple Vision accurate model unavailable on this macOS build; using the fast recogniser.');
+      try {
+        fs.writeFileSync(LEVEL_MARKER, JSON.stringify({ level: 'fast', osRelease: os.release(), at: Date.now() }));
+      } catch {
+        // temp folder not writable: detection simply repeats next start
+      }
     }
     const W = parsed.width || 1;
     const H = parsed.height || 1;
-    const lines = (parsed.lines || [])
-      .map((l) => {
-        const [x, y, w, h] = l.box || [];
-        const q = l.quad || [];
-        return lineFrom(l.text, { x, y, w, h }, {
-          confidence: l.confidence,
-          angle: angleFromWords((l.words || []).map((wd) => wd.box), W, H) ?? (q.length === 4 ? angleOf(q[0], q[1], W, H) : 0),
-          words: (l.words || []).map((wd) => ({ text: wd.text, box: { x: wd.box[0], y: wd.box[1], w: wd.box[2], h: wd.box[3] } }))
-        });
-      })
-      .sort((a, b) => a.box.y - b.box.y || a.box.x - b.box.x);
-    return { provider: parsed.level === 'fast' ? 'Apple Vision (fast)' : 'Apple Vision', hasBoxes: true, width: parsed.width, height: parsed.height, lines };
+    const toLine = (l) => {
+      const [x, y, w, h] = l.box || [];
+      const q = l.quad || [];
+      return lineFrom(l.text, { x, y, w, h }, {
+        confidence: l.confidence,
+        angle: angleFromWords((l.words || []).map((wd) => wd.box), W, H) ?? (q.length === 4 ? angleOf(q[0], q[1], W, H) : 0),
+        words: (l.words || []).map((wd) => ({ text: wd.text, box: { x: wd.box[0], y: wd.box[1], w: wd.box[2], h: wd.box[3] } }))
+      });
+    };
+    // The accurate reader is better at decorative/script text but can silently
+    // drop whole lines; fill those gaps from the fast reader.
+    const primary = (parsed.lines || []).map(toLine);
+    const covered = (b) =>
+      primary.some(({ box: a }) => {
+        const xo = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+        const yo = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+        return xo > 0.3 * Math.min(a.w, b.w) && yo > 0.4 * Math.min(a.h, b.h);
+      });
+    const filled = (parsed.fastLines || []).map(toLine).filter((l) => l.box && !covered(l.box));
+    const lines = [...primary, ...filled].sort((a, b) => a.box.y - b.box.y || a.box.x - b.box.x);
+    const provider = parsed.level === 'fast' ? 'Apple Vision (fast)' : filled.length ? 'Apple Vision (accurate + fast)' : 'Apple Vision';
+    return { provider, hasBoxes: true, width: parsed.width, height: parsed.height, lines };
   });
 }
 

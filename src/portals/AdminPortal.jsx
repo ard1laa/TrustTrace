@@ -349,12 +349,17 @@ export default function AdminPortal({
                           {draft.studentName} ({draft.studentId}) • {draft.competencyDomain}
                         </div>
                         <CredentialTags credential={draft} />
-                        {draft.aiForensics?.outcome === 'review' ? (
-                          <ul className="text-[11px] text-amber-800 dark:text-amber-300 space-y-0.5">
-                            {(draft.aiForensics.reviewReasons || []).map((reason) => (
-                              <li key={reason}>• {reason.replace(/^Gate \d: /, '')}</li>
-                            ))}
-                          </ul>
+                        {['review', 'inconclusive'].includes(draft.aiForensics?.outcome) ? (
+                          <div className="space-y-0.5">
+                            <p className={`text-[11px] font-bold ${draft.aiForensics.outcome === 'review' ? 'text-amber-800 dark:text-amber-300' : 'text-slate-600 dark:text-slate-300'}`}>
+                              {draft.aiForensics.outcome === 'review' ? 'Scanner flagged:' : 'Scanner could not verify:'}
+                            </p>
+                            <ul className={`text-[11px] space-y-0.5 ${draft.aiForensics.outcome === 'review' ? 'text-amber-800 dark:text-amber-300' : 'text-slate-600 dark:text-slate-300'}`}>
+                              {(draft.aiForensics.reviewReasons || []).map((reason) => (
+                                <li key={reason}>• {reason.replace(/^Gate \d: /, '')}</li>
+                              ))}
+                            </ul>
+                          </div>
                         ) : (
                           <p className="text-[11px] text-[#666666] dark:text-[#8B949E]">
                             {draft.aiForensics?.overallConfidence != null ? `Scanner: ${draft.aiForensics.verdict || `${draft.aiForensics.overallConfidence}%`}` : 'Submitted for review by the student'}

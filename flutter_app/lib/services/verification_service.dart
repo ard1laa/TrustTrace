@@ -22,14 +22,13 @@ class VerificationService {
     await ApiService.refreshIssuerDid();
     final key = ApiService.cachedIssuerKey();
 
-    PortfolioVerification? local;
-    if (payload != null) {
-      if (key == null) {
-        return const VerificationOutcome(
-            error: "This device hasn't been online yet, so it has no issuer key to check signatures. Connect once, then scan again.");
-      }
-      local = verifyPortfolioPayload(payload, key);
+    // Without the registrar's public key no signature can be checked — say so
+    // instead of marking every credential invalid.
+    if (key == null) {
+      return const VerificationOutcome(
+          error: "Couldn't get the registrar's public key to check signatures. Connect to the server once, then scan again.");
     }
+    final local = payload != null ? verifyPortfolioPayload(payload, key) : null;
 
     final res = await ApiService.verifyLookup(_lookupFrom(text, payload));
     if (res.ok) {
@@ -38,6 +37,9 @@ class VerificationService {
           .map((c) => {...c, 'signatureValid': verifyStoredCredential(c, key), 'revoked': c['state'] == 'Revoked'})
           .toList();
       return VerificationOutcome(holder: holder, credentials: creds);
+    }
+    if (res.timedOut) {
+      return const VerificationOutcome(error: 'The server took too long to respond (slow connection, or it is starting up). Try again in a moment.');
     }
     if (local != null && res.offline) {
       return VerificationOutcome(

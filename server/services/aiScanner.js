@@ -3,14 +3,16 @@ import path from 'path';
 import zlib from 'zlib';
 import { compareNames, findNameInText, nameTokens } from './nameMatch.js';
 import { extractLayout, textOnlyLayout } from './ocrLayout.js';
-import { parseCertificate, looksLikePersonName, CATEGORIES } from './certificateParser.js';
+import { parseCertificate, looksLikePersonName, extractDateLine, CATEGORIES } from './certificateParser.js';
+import { assessImageQuality } from './imageQuality.js';
+import { similarity } from './nameMatch.js';
 import { detectScene } from './sceneDetector.js';
 import { analyzeTampering, locateNameRegion } from './tamperForensics.js';
 import { crossCheckEvent } from './eventCrossCheck.js';
 import { resolveField, inferAxisFromText } from '../../shared/skillTaxonomy.js';
 
 // ---------------------------------------------------------------------------
-// Gate 5 — generator signatures. Only matched against metadata fields
+// Check 6 — generator signatures. Only matched against metadata fields
 // (EXIF/XMP/PNG text/PDF Info/C2PA), never against document content, so a
 // genuine "ChatGPT Workshop" certificate is not mistaken for an AI image.
 // ---------------------------------------------------------------------------
@@ -36,7 +38,7 @@ const GENERATOR_PATTERNS = [
 // Export filenames these tools use by default.
 const GENERATOR_FILENAMES = [/^dall[·-]?e[\s_]\d{4}/i, /^chatgpt image/i, /^gemini_generated_image/i, /^midjourney_/i];
 
-// Gate 3 — fictional entities that recur in AI-generated certificate templates.
+// Check 4 — fictional entities that recur in AI-generated certificate templates.
 const AI_HALLUCINATION_BLACKLIST = [
   { pattern: /alexander\s+r\.?\s+chen/i, label: 'Recurring AI template recipient ("Alexander R. Chen")' },
   { pattern: /global\s+institute\s+of\s+artificial\s+intelligence/i, label: 'Fictional issuer ("Global Institute of Artificial Intelligence")' },
@@ -236,7 +238,9 @@ function geminiLayout(gemini) {
 // Gate helpers. status: pass | warn | fail. A warning sends the certificate to
 // a registrar instead of minting it straight away.
 // ---------------------------------------------------------------------------
-function gate(id, number, title, status, detail, labels = {}) {
+// status: pass | warn (suspicious → registrar) | inconclusive (couldn't be
+// checked → registrar) | fail (clear evidence → rejected).
+function gate(id, number, title, status, detail, labels = {}, extra = {}) {
   const passed = status !== 'fail';
   return {
     id,
@@ -245,20 +249,56 @@ function gate(id, number, title, status, detail, labels = {}) {
     status,
     passed,
     criticalFail: !passed,
-    score: status === 'pass' ? 100 : status === 'warn' ? 60 : 0,
-    statusLabel: status === 'pass' ? 'Passed' : status === 'warn' ? labels.warn || 'Needs review' : labels.fail || 'Rejected',
-    detail
+    score: status === 'pass' ? 100 : status === 'warn' ? 60 : status === 'inconclusive' ? 50 : 0,
+    statusLabel:
+      status === 'pass'
+        ? labels.pass || 'Passed'
+        : status === 'warn'
+        ? labels.warn || 'Needs review'
+        : status === 'inconclusive'
+        ? labels.inconclusive || 'Could not check'
+        : labels.fail || 'Rejected',
+    detail,
+    ...extra
   };
 }
 
+const normalise = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+function locateTitleLine(lines, title) {
+  const target = normalise(title);
+  if (target.length < 4) return null;
+  let best = null;
+  for (const l of lines) {
+    const text = normalise(l.text);
+    if (!text) continue;
+    const score = text.includes(target) || target.includes(text) ? Math.min(text.length, target.length) / Math.max(text.length, target.length) + 0.3 : similarity(text, target);
+    if (score >= 0.8 && (!best || score > best.score)) best = { line: l, score };
+  }
+  return best?.line || null;
+}
+
+// "Certificate No: UTM-2025-00123", "Credential ID ABC123", "Serial #..."
+const CERT_NUMBER = /\b(?:certificate|cert\.?|credential|serial|reference|ref\.?|verification|award)\s*(?:no\.?|number|num\.?|#|id|code)\s*[:.#-]?\s*([A-Z0-9][A-Z0-9\-/.]{3,30}[A-Z0-9])/i;
+function extractCertificateNumber(lines) {
+  for (const l of lines) {
+    const m = l.text.match(CERT_NUMBER);
+    if (m && /\d/.test(m[1])) return m[1].toUpperCase();
+  }
+  return '';
+}
+
 // ---------------------------------------------------------------------------
-// Pipeline
-//   1. Document layout (3D desk/table renders)
-//   2. Recipient name vs. account holder
-//   3. Known AI-template content
-//   4. Issuer & event — online cross-check
-//   5. File metadata — AI generators
-//   6. Tamper forensics — edited names (ELA, noise, alignment, PDF edits)
+// Pipeline (8 checks). Outcomes:
+//   verified     — every check ran and found nothing (not proof of authenticity)
+//   review       — something suspicious; a registrar decides
+//   inconclusive — a key check couldn't run (unreadable, name not found); registrar
+//   rejected     — clear evidence (name mismatch, known AI template, edited
+//                  field, generator metadata, file registered to someone else)
+//   1. Image quality & readability      5. Issuer & event (online cross-check)
+//   2. Document layout (photo / 3D)     6. File metadata (AI generators)
+//   3. Recipient name vs. account       7. Tamper forensics: name, date, title
+//   4. AI-template content              8. Consistency & registry (dates, duplicates)
 // ---------------------------------------------------------------------------
 export async function analyzeCertificateUpload({
   fileBase64,
@@ -269,7 +309,8 @@ export async function analyzeCertificateUpload({
   studentUniversity = '',
   studentField = '',
   clientPixelMetrics = null,
-  clientOcrText = ''
+  clientOcrText = '',
+  registryCheck = null
 }) {
   const base64 = String(fileBase64 || '').includes(',') ? String(fileBase64).split(',')[1] : String(fileBase64 || '');
   const buffer = Buffer.from(base64, 'base64');
@@ -304,122 +345,211 @@ export async function analyzeCertificateUpload({
   const metadata = extractFileMetadata(buffer);
   const dims = parseImageDimensions(buffer);
   const geometry = clientPixelMetrics?.version === 2 ? clientPixelMetrics : null;
+  const isPdf = mimeType.includes('pdf');
   const gates = [];
 
-  // Gate 1 — flat document vs. certificate shown in a 3D scene (server-side;
-  // the client's measurement is only a fallback for formats sharp can't read).
-  const scene = mimeType.includes('pdf')
-    ? { verdict: 'flat', reason: 'Flat document layout confirmed (PDF).', geometry: null, shape: null, text: null }
-    : await detectScene({ buffer, layout, visionSaysScene: gemini ? Boolean(gemini.is3dMockupOrTabletop) : null, clientGeometry: geometry });
-  const sceneStatus = scene.verdict === 'scene' ? 'fail' : scene.verdict === 'possible' ? 'warn' : 'pass';
+  // Gate 1 — image quality & readability. Never a reason to reject; a poor
+  // image makes every other check unreliable, so the result is inconclusive.
+  const quality = await assessImageQuality(buffer, mimeType, layout).catch(() => ({ level: 'fair', issues: ['Image quality could not be measured.'], metrics: {} }));
+  const qualityStatus = quality.level === 'good' || quality.level === 'fair' ? 'pass' : 'inconclusive';
   gates.push(
     gate(
-      'gate1_layout', 1, 'Gate 1: Document Layout',
-      sceneStatus,
-      sceneStatus === 'fail' ? `${scene.reason} Upload the original PDF or a flat scan.` : scene.reason,
-      { fail: 'Rejected: 3D scene', warn: 'Check layout' }
+      'gate_quality', 1, 'Image Quality & Readability',
+      qualityStatus,
+      quality.issues.length ? quality.issues.join(' ') : isPdf ? 'Text extracted from the PDF.' : 'Sharp, readable image.',
+      { pass: quality.level === 'fair' ? 'Acceptable' : 'Passed', inconclusive: quality.level === 'unreadable' ? 'Unreadable' : 'Poor quality' },
+      { alwaysShowDetail: quality.level !== 'good' }
     )
   );
 
-  // Gate 2 — recipient identity
+  // Gate 2 — flat document vs. certificate shown in a 3D scene. A photographed
+  // certificate is not evidence of forgery, so this check never rejects.
+  const scene = isPdf
+    ? { verdict: 'flat', reason: 'Flat document layout confirmed (PDF).', geometry: null, shape: null, text: null }
+    : await detectScene({ buffer, layout, visionSaysScene: gemini ? Boolean(gemini.is3dMockupOrTabletop) : null, clientGeometry: geometry });
+  const sceneStatus = scene.verdict === 'flat' ? 'pass' : 'warn';
+  gates.push(
+    gate(
+      'gate_layout', 2, 'Document Layout',
+      sceneStatus,
+      sceneStatus === 'warn'
+        ? `${scene.reason} A registrar will confirm it is an original. For instant verification, upload the original PDF or use the in-app camera.`
+        : scene.reason,
+      { warn: scene.verdict === 'scene' ? 'Photo / 3D scene' : 'Check layout' }
+    )
+  );
+
+  // Gate 3 — recipient identity
   const triggerName = gemini?.recipientName && looksLikePersonName(gemini.recipientName) ? gemini.recipientName.trim() : parsed.recipient?.name || '';
-  let gate2 = 'pass';
+  let identityStatus = 'pass';
   let identityVerified = false;
-  let gate2Detail;
+  let identityDetail;
   if (!studentName.trim()) {
-    gate2Detail = 'No account name to compare against.';
+    identityDetail = 'No account name to compare against.';
   } else if (!hasOcr) {
-    gate2Detail = `No machine-readable text in this file; the credential is bound to ${studentName}'s account.`;
+    identityStatus = 'inconclusive';
+    identityDetail = 'No machine-readable text, so the recipient name could not be checked.';
   } else {
     const inText = findNameInText(ocrText, studentName);
     const vsTrigger = triggerName ? compareNames(triggerName, studentName) : null;
     if (inText.found || vsTrigger?.matched) {
       identityVerified = true;
-      gate2Detail = `Recipient matches the account holder (${studentName}).`;
+      identityDetail = `Recipient matches the account holder (${studentName}).`;
     } else if (triggerName && nameTokens(triggerName).length >= 2) {
-      gate2 = 'fail';
-      gate2Detail = `This certificate is issued to "${triggerName}", which does not match your account name "${studentName}".`;
+      const closeness = similarity(nameTokens(triggerName).join(''), nameTokens(studentName).join(''));
+      if ((vsTrigger?.matchedTokens || 0) === 0 && closeness < 0.5) {
+        identityStatus = 'fail';
+        identityDetail = `This certificate is issued to "${triggerName}", which does not match your account name "${studentName}".`;
+      } else {
+        // Partly matching: often an OCR misread of a decorative name, sometimes a near-copy.
+        identityStatus = 'warn';
+        identityDetail = `The printed name reads as "${triggerName}", which only partly matches "${studentName}". A registrar will compare them.`;
+      }
     } else {
-      gate2Detail = `Recipient name was not legible; the credential is bound to ${studentName}'s account.`;
+      identityStatus = 'inconclusive';
+      identityDetail = 'The recipient name could not be read clearly (decorative font or low resolution).';
     }
   }
-  gates.push(gate('gate2_recipient', 2, 'Gate 2: Recipient Identity', gate2, gate2Detail, { fail: 'Rejected: name mismatch' }));
+  gates.push(
+    gate('gate_recipient', 3, 'Recipient Identity', identityStatus, identityDetail, { fail: 'Name mismatch', warn: 'Partial match', inconclusive: 'Name unreadable' }, { alwaysShowDetail: true })
+  );
 
-  // Gate 3 — AI template content
+  // Gate 4 — AI-generated template content. Known template text is evidence;
+  // a vision model's impression is only a reason for a human to look.
   const blacklistHits = AI_HALLUCINATION_BLACKLIST.filter((item) => item.pattern.test(ocrText)).map((i) => i.label);
-  if (gemini?.isAiGeneratedOrFake && blacklistHits.length === 0 && hasOcr) {
-    blacklistHits.push('Visual analysis found AI-generation artifacts (garbled text or seals)');
-  }
+  const aiOpinion = Boolean(gemini?.isAiGeneratedOrFake) && blacklistHits.length === 0 && hasOcr;
   gates.push(
     gate(
-      'gate3_aiTemplate', 3, 'Gate 3: AI Template Check',
-      blacklistHits.length ? 'fail' : 'pass',
-      blacklistHits.length ? `Matched known AI-generated template content: ${blacklistHits.join('; ')}.` : 'No AI-template content found.',
-      { fail: 'Rejected: AI template' }
+      'gate_aiTemplate', 4, 'AI Template Check',
+      blacklistHits.length ? 'fail' : aiOpinion ? 'warn' : 'pass',
+      blacklistHits.length
+        ? `Matched known AI-generated template content: ${blacklistHits.join('; ')}.`
+        : aiOpinion
+        ? 'The vision model reported possible AI-generation artefacts (garbled text or seals). A registrar will check.'
+        : 'No AI-template content found.',
+      { fail: 'AI template', warn: 'Possible AI image' }
     )
   );
 
-  // Gate 4 — issuer & event, cross-checked online
+  // Gate 5 — issuer & event, cross-checked online
   const issuer = (parsed.issuer || studentUniversity || 'University Registrar Office').trim();
   const fictionalIssuer = /global\s+institute\s+of\s+artificial\s+intelligence/i.test(issuer);
   const eventCheck = hasOcr && !fictionalIssuer
     ? await crossCheckEvent({ eventName: parsed.eventName || parsed.title, issuer: parsed.issuer, text: ocrText })
     : { status: 'skipped', detail: hasOcr ? '' : 'No readable event or issuer text.', evidence: [] };
-  const gate4 = fictionalIssuer ? 'fail' : eventCheck.deadDomains?.length ? 'warn' : 'pass';
+  const issuerStatus = fictionalIssuer ? 'fail' : eventCheck.deadDomains?.length ? 'warn' : 'pass';
   gates.push(
     gate(
-      'gate4_issuer', 4, 'Gate 4: Issuer & Event',
-      gate4,
+      'gate_issuer', 5, 'Issuer & Event',
+      issuerStatus,
       fictionalIssuer ? `"${issuer}" is a known fictional issuer.` : `Issuer: ${issuer}. ${eventCheck.detail || ''}`.trim(),
-      { fail: 'Rejected: fictional issuer', warn: 'Unverified website' }
+      { fail: 'Fictional issuer', warn: 'Unverified website' },
+      { alwaysShowDetail: true }
     )
   );
 
-  // Gate 5 — generator metadata
+  // Gate 6 — generator metadata
   const metaHit = GENERATOR_PATTERNS.map((re) => metadata.text.match(re)?.[0]).find(Boolean);
   const nameHit = GENERATOR_FILENAMES.some((re) => re.test(path.basename(fileName)));
   const generatorSignature = metaHit || (nameHit ? `filename "${path.basename(fileName)}"` : null);
   gates.push(
     gate(
-      'gate5_metadata', 5, 'Gate 5: File Metadata',
+      'gate_metadata', 6, 'File Metadata',
       generatorSignature ? 'fail' : 'pass',
       generatorSignature
         ? `AI image generator signature found in file metadata (${generatorSignature}).`
         : metadata.hasC2pa ? 'Content Credentials present with no AI-generation claim.' : 'No AI generator signatures in file metadata.',
-      { fail: 'Rejected: AI metadata' }
+      { fail: 'AI metadata' }
     )
   );
 
-  // Gate 6 — tamper forensics around the recipient name
+  // Gate 7 — tamper forensics on the fields a forger changes: name, date, title.
   const nameLine = locateNameRegion(layout, [identityVerified ? studentName : '', triggerName, studentName]);
-  const tamper = await analyzeTampering({ buffer, mimeType, layout, nameLine, metadataText: metadata.text });
+  const dateHit = extractDateLine(lines);
+  const titleLine = locateTitleLine(lines, parsed.eventName || parsed.title);
+  const targets = [
+    { field: 'name', line: nameLine },
+    { field: 'date', line: dateHit.line && dateHit.line !== nameLine ? dateHit.line : null },
+    { field: 'title', line: titleLine && titleLine !== nameLine && titleLine !== dateHit.line ? titleLine : null }
+  ];
+  const tamper = await analyzeTampering({ buffer, mimeType, layout, targets, metadataText: metadata.text });
   if (gemini?.nameLooksEdited && tamper.verdict === 'clean') {
     const evidence = String(gemini.nameEditEvidence || '').trim().slice(0, 160);
-    tamper.signals.push({ id: 'visual', severity: 'moderate', label: 'Visual check flagged the name', detail: evidence ? `The vision model reports a pasted name: ${evidence}.` : 'The vision model reports visible signs of a pasted name.' });
+    tamper.signals.push({ id: 'visual', field: 'name', severity: 'moderate', label: 'Visual check flagged the name', detail: evidence ? `The vision model reports a pasted name: ${evidence}.` : 'The vision model reports visible signs of a pasted name.' });
     tamper.verdict = 'suspicious';
   }
-  const tamperStatus = tamper.verdict === 'tampered' ? 'fail' : tamper.verdict === 'suspicious' ? 'warn' : 'pass';
   const flagged = tamper.signals.filter((s) => s.severity !== 'weak');
+  const nameChecked = isPdf ? tamper.applicable : (tamper.fieldsChecked || []).includes('name') && tamper.regionAnalysis;
+  const tamperStatus =
+    tamper.verdict === 'tampered' ? 'fail' : tamper.verdict === 'suspicious' ? 'warn' : nameChecked ? 'pass' : 'inconclusive';
+  const checkedFields = (tamper.fieldsChecked || []).map((f) => ({ name: 'name', date: 'date', title: 'title' })[f]).filter(Boolean);
+  const editedFields = [...new Set(flagged.map((s) => s.field).filter(Boolean))];
   gates.push(
     gate(
-      'gate6_tamper', 6, 'Gate 6: Tamper Forensics',
+      'gate_tamper', 7, 'Tamper Forensics',
       tamperStatus,
       flagged.length
         ? flagged.map((s) => s.detail).join(' ')
-        : tamper.applicable
-        ? mimeType.includes('pdf') ? 'No signs of the PDF being edited after issue.' : 'Name region matches the rest of the document (error level, noise and alignment).'
-        : `File-level checks passed. ${tamper.reason || ''}`.trim(),
-      { fail: 'Rejected: edited name', warn: 'Possible edit' }
+        : tamperStatus === 'pass'
+        ? isPdf
+          ? 'No signs of the PDF being edited after issue.'
+          : `No signs of editing on the ${checkedFields.join(', ')} (error level, noise, background and alignment).`
+        : `The name region could not be analysed. ${tamper.reason || (tamper.metrics?.note ?? '')}`.trim(),
+      {
+        fail: editedFields.length ? `Edited ${editedFields.join(' & ')}` : 'Edited document',
+        warn: editedFields.length ? `Possible edit: ${editedFields.join(' & ')}` : 'Possible edit',
+        inconclusive: 'Not analysed'
+      },
+      { alwaysShowDetail: true, fieldsChecked: tamper.fieldsChecked || [] }
     )
   );
 
-  // Verdict
+  // Gate 8 — internal consistency and the registry of existing credentials.
+  const consistency = [];
+  const now = new Date();
+  const certificateNumber = extractCertificateNumber(lines);
+  if (parsed.issuanceDate) {
+    const dated = new Date(parsed.issuanceDate);
+    if (dated.getTime() - now.getTime() > 7 * 86400000) consistency.push({ status: 'warn', text: `The certificate is dated ${parsed.issuanceDate}, which is in the future.` });
+    const titleYears = [...`${parsed.title} ${parsed.eventName || ''}`.matchAll(/\b(19[89]\d|20\d\d)\b/g)].map((m) => Number(m[1]));
+    const conflict = titleYears.find((y) => Math.abs(y - dated.getFullYear()) >= 2);
+    if (conflict) consistency.push({ status: 'warn', text: `The date (${dated.getFullYear()}) doesn't match the year in the title (${conflict}).` });
+  }
+  if (registryCheck) {
+    const found = await registryCheck({ fileHash, certificateNumber });
+    if (found?.sameFileOtherAccount) consistency.push({ status: 'fail', text: 'This exact file is already registered to another student.' });
+    else if (found?.sameFileThisAccount) consistency.push({ status: 'warn', text: 'You have already uploaded this exact file.' });
+    if (found?.numberOtherAccount) consistency.push({ status: 'warn', text: `Certificate number ${certificateNumber} is already registered to another student — possibly a copied certificate with the name changed.` });
+  }
+  const consistencyStatus = consistency.some((c) => c.status === 'fail') ? 'fail' : consistency.length ? 'warn' : 'pass';
+  gates.push(
+    gate(
+      'gate_consistency', 8, 'Consistency & Registry',
+      consistencyStatus,
+      consistency.length
+        ? consistency.map((c) => c.text).join(' ')
+        : `Date and details are consistent${certificateNumber ? `; certificate number ${certificateNumber} is not registered elsewhere` : ''}.`,
+      { fail: 'Duplicate', warn: 'Inconsistent' }
+    )
+  );
+
+  // Verdict: clear evidence rejects; suspicion → registrar; missing evidence →
+  // "unable to verify" (also a registrar). "Verified" means every check ran
+  // and found nothing — not a guarantee the certificate is genuine.
   const failed = gates.filter((g) => g.status === 'fail');
   const warned = gates.filter((g) => g.status === 'warn');
-  const outcome = failed.length ? 'rejected' : warned.length ? 'review' : 'verified';
-  const confidence = outcome === 'rejected' ? Math.max(5, 40 - (failed.length - 1) * 15) : outcome === 'review' ? Math.max(55, 85 - warned.length * 12) : 100;
+  const unknown = gates.filter((g) => g.status === 'inconclusive');
+  const outcome = failed.length ? 'rejected' : warned.length ? 'review' : unknown.length ? 'inconclusive' : 'verified';
+  const confidence =
+    outcome === 'rejected'
+      ? Math.max(5, 30 - (failed.length - 1) * 10)
+      : outcome === 'review'
+      ? Math.max(35, 65 - (warned.length - 1) * 10)
+      : outcome === 'inconclusive'
+      ? 45
+      : (tamper.fieldsChecked || []).length >= 2 || isPdf ? 100 : 92;
 
-  const title = (parsed.title || 'Co-Curricular Micro-Credential').trim();
+  const title = (parsed.title || '').trim();
   const domain = axes.includes(gemini?.competencyDomain)
     ? gemini.competencyDomain
     : inferAxisFromText(field.id, `${title} ${parsed.category.type} ${ocrText} ${fileName}`) || axes[0];
@@ -428,6 +558,7 @@ export async function analyzeCertificateUpload({
     ? parsed.scoring
     : { requiresScoring: true, kind: 'placement', result: String(gemini.resultOrPlacement).slice(0, 40), evidence: 'vision model' };
 
+  const describe = (g) => `${g.title}: ${g.detail}`;
   const forensics = {
     fileHash,
     fileSizeKB: Number((buffer.length / 1024).toFixed(1)),
@@ -435,43 +566,49 @@ export async function analyzeCertificateUpload({
     dimensions: dims ? `${dims.width}×${dims.height}px` : geometry ? `${geometry.sourceWidth || geometry.width}×${geometry.sourceHeight || geometry.height}px` : 'Document',
     geometry: scene.geometry || geometry,
     scene: { verdict: scene.verdict, shape: scene.shape, text: scene.text },
+    quality: { level: quality.level, metrics: quality.metrics },
     ocrAvailable: hasOcr,
     ocrProvider: layout.provider,
     layoutAvailable: layout.hasBoxes,
     identityVerified,
+    certificateNumber,
     outcome,
     overallConfidence: confidence,
+    confidenceLabel: outcome === 'verified' ? 'High' : outcome === 'rejected' ? 'High (problem found)' : 'Low — needs a person',
     passed: outcome !== 'rejected',
     isAiRejected: outcome === 'rejected',
     hasCriticalFail: outcome === 'rejected',
-    identityMismatch: gate2 === 'fail',
-    requiresAdminQueue: outcome === 'review',
+    identityMismatch: identityStatus === 'fail',
+    requiresAdminQueue: outcome === 'review' || outcome === 'inconclusive',
     extractedRecipientName: identityVerified || !triggerName ? studentName : triggerName,
     extractedIssuer: issuer,
     eventCheck,
-    tamper: { verdict: tamper.verdict, applicable: tamper.applicable, signals: tamper.signals, metrics: tamper.metrics, reason: tamper.reason || '' },
+    tamper: { verdict: tamper.verdict, applicable: tamper.applicable, fieldsChecked: tamper.fieldsChecked || [], signals: tamper.signals, metrics: tamper.metrics, reason: tamper.reason || '' },
     gates,
-    rejectionReasons: failed.map((g) => `${g.title}: ${g.detail}`),
-    reviewReasons: warned.map((g) => `${g.title}: ${g.detail}`),
+    rejectionReasons: failed.map(describe),
+    reviewReasons: [...warned, ...unknown].map(describe),
+    inconclusiveReasons: unknown.map(describe),
     verdict:
       outcome === 'rejected'
-        ? 'Rejected — this certificate failed verification'
+        ? `Rejected — ${failed.map((g) => g.statusLabel.toLowerCase()).join(', ')}`
         : outcome === 'review'
         ? `Needs registrar review — ${warned.map((g) => g.statusLabel.toLowerCase()).join(', ')}`
-        : 'Verified — passed all 6 checks (100%)',
+        : outcome === 'inconclusive'
+        ? `Unable to verify automatically — ${unknown.map((g) => g.statusLabel.toLowerCase()).join(', ')}`
+        : `Verified — no problems found in ${gates.length} checks`,
     analyzedAt: new Date().toISOString()
   };
 
   return {
-    engineUsed: `TrustTrace 6-Gate (${layout.provider === 'none' ? 'metadata only' : layout.provider}${gemini ? ' + Gemini' : ''})`,
+    engineUsed: `TrustTrace 8-check (${layout.provider === 'none' ? 'metadata only' : layout.provider}${gemini ? ' + Gemini' : ''})`,
     extracted: {
       studentName,
       studentId,
-      achievementTitle: title,
+      achievementTitle: title || '',
       certificateHeading: parsed.heading,
       eventName: parsed.eventName,
       issuingOrganization: issuer,
-      issuanceDate: parsed.issuanceDate || new Date().toISOString().slice(0, 10),
+      issuanceDate: parsed.issuanceDate || '',
       competencyDomain: domain,
       achievementType: category,
       typeConfidence: parsed.category.confidence,
@@ -479,6 +616,8 @@ export async function analyzeCertificateUpload({
       requiresScoring: scoring.requiresScoring,
       achievementResult: scoring.result,
       resultKind: scoring.kind,
+      certificateNumber,
+      detected: { title: Boolean(title), issuer: Boolean(parsed.issuer), date: Boolean(parsed.issuanceDate), result: Boolean(scoring.result) },
       attainedLevel: 'Expert / Mastery',
       masteryScore: outcome === 'rejected' ? 0 : 100
     },

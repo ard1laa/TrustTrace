@@ -3,6 +3,19 @@ import 'package:flutter/material.dart';
 import '../core/skill_taxonomy.dart';
 import '../theme/trusttrace_theme.dart';
 
+/// Widest the stacked cards of a page get. Phones are narrower than this, so
+/// nothing changes there; on an iPad the cards form a centred, readable column
+/// instead of stretching across 1,000+ points.
+const double kMaxContentWidth = 760;
+
+/// Padding for a page's main list. The list itself still spans the whole
+/// screen (so it scrolls wherever you swipe); only its content is centred.
+EdgeInsets pagePadding(BuildContext context, {double horizontal = 14, double top = 12, double bottom = 32}) {
+  final width = MediaQuery.sizeOf(context).width;
+  final side = width > kMaxContentWidth + horizontal * 2 ? (width - kMaxContentWidth) / 2 : horizontal;
+  return EdgeInsets.fromLTRB(side, top, side, bottom);
+}
+
 String initialsOf(String? name) {
   final parts = (name ?? '').trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty).take(2);
   final out = parts.map((p) => p[0].toUpperCase()).join();

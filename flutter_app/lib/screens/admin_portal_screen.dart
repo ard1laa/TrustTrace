@@ -105,7 +105,7 @@ class _AdminPortalScreenState extends State<AdminPortalScreen> {
     final drafts = scopedCreds.where((c) => c['state'] == 'Draft').toList();
 
     return ListView(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 28),
+      padding: pagePadding(context, bottom: 28),
       children: [
         // Admin Header Card
         Card(
@@ -254,13 +254,24 @@ class _AdminPortalScreenState extends State<AdminPortalScreen> {
                           ),
                           const SizedBox(height: 6),
                           CredentialTags(d),
-                          if (d['aiForensics']?['outcome'] == 'review')
+                          if (['review', 'inconclusive'].contains(d['aiForensics']?['outcome'])) ...[
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(d['aiForensics']['outcome'] == 'review' ? 'Scanner flagged:' : 'Scanner could not verify:',
+                                  style: TextStyle(
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.w800,
+                                      color: d['aiForensics']['outcome'] == 'review' ? TrustTraceTheme.warningAmber : const Color(0xFF64748B))),
+                            ),
                             for (final reason in (d['aiForensics']['reviewReasons'] as List? ?? const []))
                               Padding(
                                 padding: const EdgeInsets.only(top: 4),
                                 child: Text('• ${'$reason'.replaceFirst(RegExp(r'^Gate \d: '), '')}',
-                                    style: const TextStyle(fontSize: 11.5, color: TrustTraceTheme.warningAmber)),
+                                    style: TextStyle(
+                                        fontSize: 11.5,
+                                        color: d['aiForensics']['outcome'] == 'review' ? TrustTraceTheme.warningAmber : const Color(0xFF64748B))),
                               ),
+                          ],
                           const SizedBox(height: 10),
                           Wrap(
                             spacing: 8,

@@ -4,6 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:trusttrace_mobile/core/portfolio_qr.dart';
+import 'package:trusttrace_mobile/screens/auth_screen.dart';
+import 'package:trusttrace_mobile/screens/qr_verifier_screen.dart';
 import 'package:trusttrace_mobile/screens/student_wallet_screen.dart';
 import 'package:trusttrace_mobile/services/api_service.dart';
 import 'package:trusttrace_mobile/theme/trusttrace_theme.dart';
@@ -93,6 +95,79 @@ void main() {
       final res = await http.runWithClient(() => ApiService.login('a@b.c', 'x'), () => client);
       expect(res.error, 'Incorrect password.');
       expect(refreshes, 0);
+    });
+  });
+
+  group('Google & Apple buttons', () {
+    Future<void> pumpAuth(WidgetTester tester, Map<String, dynamic> providers) async {
+      tester.view.physicalSize = const Size(390 * 3, 844 * 3);
+      tester.view.devicePixelRatio = 3;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(MaterialApp(
+        theme: TrustTraceTheme.lightTheme,
+        home: AuthScreen(onAuthenticated: (_, __) {}, providersForTest: providers),
+      ));
+      await tester.pump();
+    }
+
+    testWidgets('development server without client IDs: disabled buttons + setup note', (tester) async {
+      await pumpAuth(tester, {'google': {'enabled': false}, 'apple': {'enabled': false}, 'setupHints': true});
+      expect(find.text('Continue with Google'), findsOneWidget);
+      expect(find.textContaining('not set up on this server'), findsOneWidget);
+      final button = tester.widget<OutlinedButton>(find.ancestor(of: find.text('Continue with Google'), matching: find.byWidgetPredicate((w) => w is OutlinedButton)));
+      expect(button.onPressed, isNull);
+      expect(find.text('or sign in with email'), findsOneWidget);
+    });
+
+    testWidgets('production without client IDs: hidden', (tester) async {
+      await pumpAuth(tester, {'google': {'enabled': false}, 'apple': {'enabled': false}, 'setupHints': false});
+      expect(find.text('Continue with Google'), findsNothing);
+    });
+
+    testWidgets('server unreachable at first (e.g. iOS Local Network prompt): retries, then shows Google', (tester) async {
+      var calls = 0;
+      final client = MockClient((req) async {
+        if (!req.url.path.endsWith('/auth/providers')) return json(404, {});
+        calls++;
+        if (calls == 1) throw http.ClientException('No route to host');
+        return json(200, {'google': {'enabled': true, 'webClientId': 'x', 'iosClientId': 'y'}, 'apple': {'enabled': false}, 'setupHints': false});
+      });
+      await http.runWithClient(() async {
+        tester.view.physicalSize = const Size(390 * 3, 844 * 3);
+        tester.view.devicePixelRatio = 3;
+        addTearDown(tester.view.reset);
+        await tester.pumpWidget(MaterialApp(theme: TrustTraceTheme.lightTheme, home: AuthScreen(onAuthenticated: (_, __) {})));
+        await tester.pump();
+        expect(find.text('Continue with Google'), findsNothing);
+        await tester.pump(const Duration(seconds: 6));
+        await tester.pump();
+        expect(calls, 2);
+        expect(find.text('Continue with Google'), findsOneWidget);
+        await tester.pumpWidget(const SizedBox()); // dispose cancels any retry
+      }, () => client);
+    });
+
+    testWidgets('configured Google: enabled button, no setup note', (tester) async {
+      await pumpAuth(tester, {'google': {'enabled': true, 'webClientId': 'x', 'iosClientId': 'y'}, 'apple': {'enabled': false}, 'setupHints': false});
+      final button = tester.widget<OutlinedButton>(find.ancestor(of: find.text('Continue with Google'), matching: find.byWidgetPredicate((w) => w is OutlinedButton)));
+      expect(button.onPressed, isNotNull);
+      expect(find.textContaining('not set up on this server'), findsNothing);
+    });
+  });
+
+  group('verifier', () {
+    testWidgets('offers camera scan and QR image upload', (tester) async {
+      tester.view.physicalSize = const Size(320 * 3, 640 * 3);
+      tester.view.devicePixelRatio = 3;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(MaterialApp(
+        theme: TrustTraceTheme.lightTheme,
+        home: const Scaffold(body: QrVerifierScreen(recruiter: {'id': 'r1', 'name': 'Rec'}, students: [], credentials: [], offline: false)),
+      ));
+      await tester.pump();
+      expect(find.text('Scan QR code'), findsOneWidget);
+      expect(find.byTooltip('Upload a QR image'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
   });
 

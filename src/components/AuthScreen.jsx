@@ -10,7 +10,7 @@ import DeveloperPanel from './DeveloperPanel.jsx';
 import { apiJson, getDeveloperToken, readFileAsDataUrl, setDeveloperToken } from '../lib/api.js';
 import { classifyEmail } from '../../shared/emailDomains.js';
 
-const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '2.1.0';
+const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '2.3.0';
 const DEV_TAPS = 7;
 const MAX_PROOF_BYTES = 4 * 1024 * 1024;
 
@@ -37,11 +37,14 @@ const EMPTY_FORM = {
   companyName: '', jobTitle: '', companyWebsite: '', companyRegId: '', departmentRole: ''
 };
 
+// The label wraps its input so screen readers (and tests) associate them.
 function Field({ label, hint, children }) {
   return (
     <div>
-      <label className="block text-xs font-semibold mb-1">{label}</label>
-      {children}
+      <label className="block">
+        <span className="block text-xs font-semibold mb-1">{label}</span>
+        {children}
+      </label>
       {hint && <p className="mt-1 text-[11px] text-[#666666] dark:text-[#8B949E]">{hint}</p>}
     </div>
   );
@@ -113,6 +116,9 @@ export default function AuthScreen({ authRoute = '/login', setAuthRoute, themeMo
   const [error, setError] = useState('');
   const [providers, setProviders] = useState(null);
   const [devOpen, setDevOpen] = useState(Boolean(getDeveloperToken()));
+  // A Google/Apple identity waiting for the rest of sign-up: { provider, idToken, profile }.
+  const [pendingSocial, setPendingSocial] = useState(null);
+  const [notice, setNotice] = useState('');
   const taps = useRef({ count: 0, last: 0 });
 
   useEffect(() => {
@@ -122,6 +128,7 @@ export default function AuthScreen({ authRoute = '/login', setAuthRoute, themeMo
   useEffect(() => {
     setStep(0);
     setError('');
+    if (!isRegister) setPendingSocial(null);
   }, [isRegister]);
 
   const steps = STEPS[role];
@@ -152,7 +159,7 @@ export default function AuthScreen({ authRoute = '/login', setAuthRoute, themeMo
       if (!form.name.trim()) return 'Enter your full name.';
       if (emailInfo.kind === 'invalid') return 'Enter a valid email address.';
       if (emailInfo.kind === 'disposable') return 'Disposable email addresses are not accepted.';
-      if (form.password.length < 8) return 'Password must be at least 8 characters.';
+      if (!pendingSocial && form.password.length < 8) return 'Password must be at least 8 characters.';
     }
     if (current === 'Your studies') {
       if (!form.fieldOfStudy) return 'Choose your programme.';
@@ -178,6 +185,7 @@ export default function AuthScreen({ authRoute = '/login', setAuthRoute, themeMo
       if (problem) return setError(problem);
       if (!isLastStep) return setStep((s) => s + 1);
     }
+    if (isRegister && pendingSocial) return completeSocialSignup(pendingSocial.provider, pendingSocial.idToken);
     setLoading('form');
     try {
       const data = await apiJson(isRegister ? '/api/auth/register' : '/api/auth/login', {
@@ -192,30 +200,72 @@ export default function AuthScreen({ authRoute = '/login', setAuthRoute, themeMo
     }
   };
 
+  // Finish sign-up with a Google/Apple identity and the wizard's answers.
+  const completeSocialSignup = async (provider, idToken) => {
+    setLoading(provider);
+    setError('');
+    try {
+      const data = await apiJson(`/api/auth/oauth/${provider}`, {
+        method: 'POST',
+        body: { ...registrationBody(), password: undefined, idToken, signup: true }
+      });
+      finishAuth(data);
+    } catch (err) {
+      const label = provider === 'google' ? 'Google' : 'Apple';
+      setError(
+        /expired/i.test(err.message)
+          ? `Your ${label} sign-in timed out while you filled in the form. Go back to the first step and choose ${label} again — your answers are kept.`
+          : err.message
+      );
+    } finally {
+      setLoading('');
+    }
+  };
+
   const handleProviderToken = useCallback(
-    async (provider, idToken, extra) => {
-      setLoading(provider);
+    async (provider, idToken, extra = {}) => {
+      const label = provider === 'google' ? 'Google' : 'Apple';
       setError('');
+      setNotice('');
+      // Re-authenticating after a timeout on the last step: finish straight away.
+      if (isRegister && pendingSocial && isLastStep) return completeSocialSignup(provider, idToken);
+      setLoading(provider);
       try {
-        const data = await apiJson(`/api/auth/oauth/${provider}`, {
-          method: 'POST',
-          body: { idToken, ...registrationBody(), ...extra, name: extra.name || form.name }
-        });
+        const data = await apiJson(`/api/auth/oauth/${provider}`, { method: 'POST', body: { idToken, name: extra.name || '' } });
+        if (data.needsOnboarding) {
+          // New to TrustTrace: choose an account type and finish the profile.
+          setPendingSocial({ provider, idToken, profile: data.profile });
+          setForm((f) => ({ ...f, email: data.profile.email, name: f.name || data.profile.name || extra.name || '', password: '' }));
+          setAuthRoute('/register');
+          setStep(0);
+          setNotice(`Signing up with ${label} as ${data.profile.email}. Choose your account type, then complete your details.`);
+          return;
+        }
         finishAuth(data);
       } catch (err) {
-        if (err.data?.needsOnboarding) {
-          setAuthRoute('/register');
-          setError(`${err.message} Complete the steps below, then continue with ${provider === 'google' ? 'Google' : 'Apple'} again.`);
-        } else {
-          setError(err.message);
+        if (err.data?.code === 'LINK_REQUIRED') {
+          setForm((f) => ({ ...f, email: err.data.email || f.email, password: '' }));
+          setAuthRoute('/login');
         }
+        setError(err.message);
       } finally {
         setLoading('');
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [role, form, proof, onAuthSuccess, setAuthRoute]
+    [role, form, proof, onAuthSuccess, setAuthRoute, isRegister, pendingSocial, isLastStep]
   );
+
+  // Apple's redirect fallback (when pop-ups are blocked) lands on /?appleIdToken=…
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const appleToken = params.get('appleIdToken');
+    if (!appleToken) return;
+    params.delete('appleIdToken');
+    window.history.replaceState({}, '', `${window.location.pathname}${params.size ? `?${params}` : ''}`);
+    handleProviderToken('apple', appleToken, {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Fills the form with the demo account, then signs in with the developer token.
   const pickDemo = async (account) => {
@@ -307,9 +357,25 @@ export default function AuthScreen({ authRoute = '/login', setAuthRoute, themeMo
                   : undefined
               }
             >
-              <input type="email" required autoComplete="email" placeholder={role === 'recruiter' ? 'you@company.com' : role === 'admin' ? 'you@university.edu' : 'you@student.university.edu'} value={form.email} onChange={set('email')} className="linkedin-input" />
+              <input
+                type="email"
+                required
+                autoComplete="email"
+                readOnly={Boolean(pendingSocial)}
+                placeholder={role === 'recruiter' ? 'you@company.com' : role === 'admin' ? 'you@university.edu' : 'you@student.university.edu'}
+                value={form.email}
+                onChange={set('email')}
+                className={`linkedin-input ${pendingSocial ? 'bg-[#F4F2EE] dark:bg-[#161B22] text-[#666666] dark:text-[#8B949E]' : ''}`}
+              />
             </Field>
-            {passwordField}
+            {pendingSocial ? (
+              <p className="text-[11px] text-[#666666] dark:text-[#8B949E] flex gap-1.5">
+                <BadgeCheck className="w-3.5 h-3.5 shrink-0 mt-px text-emerald-600" />
+                Verified by {pendingSocial.provider === 'google' ? 'Google' : 'Apple'} — no password needed. You can add one later in your profile.
+              </p>
+            ) : (
+              passwordField
+            )}
           </div>
         );
       case 'Your studies':
@@ -421,6 +487,24 @@ export default function AuthScreen({ authRoute = '/login', setAuthRoute, themeMo
               </div>
             )}
 
+            {notice && isRegister && pendingSocial && (
+              <div role="status" className="p-3 rounded-xl bg-[#EBF3FB] dark:bg-[#0A66C2]/15 border border-[#0A66C2]/25 text-xs flex gap-2 items-start">
+                <BadgeCheck className="w-4 h-4 shrink-0 mt-px text-[#0A66C2] dark:text-[#58A6FF]" />
+                <span className="flex-1">{notice}</span>
+                <button
+                  type="button"
+                  onClick={() => (setPendingSocial(null), setNotice(''), setForm((f) => ({ ...f, email: '' })))}
+                  className="font-semibold text-[#0A66C2] dark:text-[#58A6FF] hover:underline shrink-0"
+                >
+                  Use email instead
+                </button>
+              </div>
+            )}
+
+            {!isRegister && (
+              <SocialAuthButtons providers={providers} isDark={isDark} disabled={Boolean(loading)} onToken={handleProviderToken} onError={setError} mode="signin" dividerLabel="or sign in with email" />
+            )}
+
             <form onSubmit={submit} className="space-y-4" noValidate={isRegister}>
               {isRegister ? (
                 <div key={`${role}-${step}`} className="animate-fade-in">
@@ -461,8 +545,17 @@ export default function AuthScreen({ authRoute = '/login', setAuthRoute, themeMo
               </div>
             </form>
 
-            {(!isRegister || isLastStep) && (
-              <SocialAuthButtons providers={providers} isDark={isDark} disabled={Boolean(loading)} onToken={handleProviderToken} onError={setError} />
+            {isRegister && step === 0 && (!pendingSocial || /timed out/.test(error)) && (
+              <SocialAuthButtons
+                providers={providers}
+                isDark={isDark}
+                disabled={Boolean(loading)}
+                onToken={handleProviderToken}
+                onError={setError}
+                mode="signup"
+                dividerLabel="or sign up faster with"
+                dividerPosition="top"
+              />
             )}
 
             <p className="text-center text-xs text-[#666666] dark:text-[#8B949E]">

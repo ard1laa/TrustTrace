@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import '../core/skill_taxonomy.dart';
@@ -51,8 +52,31 @@ class _QrVerifierScreenState extends State<QrVerifierScreen> {
     if (mounted) setState(() => _shortlist = list);
   }
 
+  // Decodes a QR code from a saved photo or screenshot.
+  Future<void> _verifyImage() async {
+    final picked = await ApiService.pickFromGallery();
+    final path = '${picked?['filePath'] ?? ''}';
+    if (path.isEmpty || !mounted) return;
+    setState(() => _scanning = false);
+    String raw = '';
+    final controller = MobileScannerController(autoStart: false);
+    try {
+      final capture = await controller.analyzeImage(path);
+      raw = capture?.barcodes.map((b) => b.rawValue ?? '').firstWhere((v) => v.isNotEmpty, orElse: () => '') ?? '';
+    } catch (_) {
+    } finally {
+      unawaited(controller.dispose());
+    }
+    if (!mounted) return;
+    if (raw.isEmpty) {
+      showToast(context, 'No QR code found in that image. Make sure the whole code is visible, in focus and not cropped.', error: true);
+      return;
+    }
+    await _verify(raw);
+  }
+
   Future<void> _verify(String raw) async {
-    if (raw.trim().isEmpty) return;
+    if (raw.trim().isEmpty || _verifying) return;
     setState(() {
       _verifying = true;
       _scanning = false;
@@ -87,7 +111,7 @@ class _QrVerifierScreenState extends State<QrVerifierScreen> {
   @override
   Widget build(BuildContext context) {
     return ListView(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 32),
+      padding: pagePadding(context),
       children: [
         Card(
           child: Padding(
@@ -141,12 +165,25 @@ class _QrVerifierScreenState extends State<QrVerifierScreen> {
         title: 'Verify a candidate',
         icon: Icons.verified_user_outlined,
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          FilledButton.icon(
-            onPressed: () => setState(() => _scanning = !_scanning),
-            style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48), shape: const StadiumBorder()),
-            icon: Icon(_scanning ? Icons.close : Icons.qr_code_scanner),
-            label: Text(_scanning ? 'Close camera' : 'Scan QR code', style: const TextStyle(fontWeight: FontWeight.w800)),
-          ),
+          Row(children: [
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: _verifying ? null : () => setState(() => _scanning = !_scanning),
+                style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48), shape: const StadiumBorder()),
+                icon: Icon(_scanning ? Icons.close : Icons.qr_code_scanner),
+                label: Text(_scanning ? 'Close camera' : 'Scan QR code', overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w800)),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Tooltip(
+              message: 'Upload a QR image',
+              child: OutlinedButton(
+                onPressed: _verifying ? null : _verifyImage,
+                style: OutlinedButton.styleFrom(minimumSize: const Size(52, 48), padding: EdgeInsets.zero, shape: const StadiumBorder()),
+                child: const Icon(Icons.image_search_rounded, semanticLabel: 'Upload a QR image'),
+              ),
+            ),
+          ]),
           if (_scanning) ...[
             const SizedBox(height: 12),
             ClipRRect(
@@ -177,7 +214,7 @@ class _QrVerifierScreenState extends State<QrVerifierScreen> {
           if (widget.offline)
             Padding(
               padding: const EdgeInsets.only(top: 8),
-              child: Text('Offline: portfolio QR codes are verified on this device using the cached issuer key.',
+              child: Text('Offline: only Offline QR codes can be checked (signatures on this device; revocation is checked when you reconnect). Quick-scan QR codes need a connection.',
                   style: TextStyle(fontSize: 11.5, color: Theme.of(context).hintColor)),
             ),
         ]),
@@ -196,7 +233,7 @@ class _QrVerifierScreenState extends State<QrVerifierScreen> {
         Card(
           child: Padding(
             padding: const EdgeInsets.all(26),
-            child: Text('Scan a candidate\'s TrustTrace QR to check their credentials — it works even without internet.',
+            child: Text('Scan or upload a candidate\'s TrustTrace QR code to check their credentials. Signatures are verified on this device.',
                 textAlign: TextAlign.center, style: TextStyle(color: Theme.of(context).hintColor)),
           ),
         ),

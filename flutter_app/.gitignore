@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Per-developer Google Sign-In URL scheme (see docs/SOCIAL_SIGN_IN.md)
+ios/Flutter/GoogleSignIn.xcconfig

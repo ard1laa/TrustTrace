@@ -129,8 +129,8 @@ function flatNoise(r, rect) {
   return Math.sqrt(residuals.reduce((s, v) => s + (v - mean) ** 2, 0) / residuals.length);
 }
 
-function signal(id, severity, label, detail, value) {
-  return { id, severity, label, detail, value };
+function signal(id, severity, label, detail, value, field = null) {
+  return { id, severity, label, detail, value, field };
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +222,10 @@ function patchEdge(r, rect, side) {
   const x1 = rect.x1 - inset;
   if (x1 - x0 < 40 || h < 8) return null;
   let best = null;
-  for (let d = 2; d <= Math.round(h * 1.1); d++) {
+  // Start slightly inside the box: OCR boxes vary in how much of the ascenders
+  // and descenders they include, so the patch edge can fall just inside.
+  // Rows through the text itself are skipped by the flatness test below.
+  for (let d = -Math.round(h * 0.2); d <= Math.round(h * 1.1); d++) {
     const y = side === 'top' ? rect.y0 - d : rect.y1 + d;
     if (y - 6 < 0 || y + 7 > r.height) continue;
     const before = bandStats(r, y - 5, y - 1, x0, x1);
@@ -237,7 +240,7 @@ function patchEdge(r, rect, side) {
     const consistency = agree / before.cols.length;
     if (Math.abs(step) >= 1.5 && consistency >= 0.8 && (!best || Math.abs(step) > Math.abs(best.step))) {
       // inside − outside: below the top edge is inside; above the bottom edge is inside.
-      best = { step, inside: side === 'top' ? step : -step, distance: d / h };
+      best = { step, inside: side === 'top' ? step : -step, distance: Math.max(0, d) / h };
     }
   }
   return best;
@@ -253,9 +256,12 @@ function patchAround(r, rect) {
 // ---------------------------------------------------------------------------
 // Raster documents
 // ---------------------------------------------------------------------------
-async function analyzeRaster({ buffer, mimeType, layout, nameLine, metadataText }) {
+const FIELD_NAMES = { name: 'name', date: 'date', title: 'title' };
+const FIELD_LABELS = { name: 'recipient name', date: 'certificate date', title: 'achievement title' };
+
+async function analyzeRaster({ buffer, mimeType, layout, targets, metadataText }) {
   const signals = [];
-  const metrics = {};
+  const metrics = { fields: {} };
 
   // File-level: camera photo later opened in an editor.
   const editor = metadataText.match(EDITOR_SOFTWARE)?.[0];
@@ -266,95 +272,130 @@ async function analyzeRaster({ buffer, mimeType, layout, nameLine, metadataText 
     signals.push(signal('editorSoftware', 'weak', 'Image editor in metadata', `File was last saved with ${editor}.`, editor));
   }
 
-  if (!layout?.hasBoxes || !nameLine?.box) {
-    return { applicable: false, reason: layout?.hasBoxes ? 'The recipient name was not located on the page.' : 'Text positions are unavailable from the current OCR engine.', signals, metrics };
+  const located = [];
+  for (const t of targets) {
+    if (t.line?.box && !located.some((o) => o.line === t.line)) located.push(t);
+  }
+  const nameTarget = located.find((t) => t.field === 'name');
+  if (!layout?.hasBoxes || !located.length) {
+    return {
+      applicable: false,
+      fieldsChecked: [],
+      reason: layout?.hasBoxes ? 'The recipient name, date and title were not located on the page.' : 'Text positions are unavailable from the current OCR engine.',
+      signals,
+      metrics
+    };
   }
 
+  const targetLines = new Set(located.map((t) => t.line));
   const peers = layout.lines.filter(
-    (l) => l !== nameLine && l.box && l.box.h >= 0.012 && l.box.w >= 0.06 && l.text.replace(/[^A-Za-z]/g, '').length >= 4
+    (l) => !targetLines.has(l) && l.box && l.box.h >= 0.012 && l.box.w >= 0.06 && l.text.replace(/[^A-Za-z]/g, '').length >= 4
   );
   metrics.peerCount = peers.length;
 
   if (peers.length >= 3) {
-    const raster = await loadRaster(buffer, [nameLine, ...peers]);
-    const rects = [nameLine, ...peers].map((l) => rectOf(l.box, raster));
+    const raster = await loadRaster(buffer, [...located.map((t) => t.line), ...peers]);
+    const targetRects = located.map((t) => rectOf(t.line.box, raster));
+    const peerRects = peers.map((l) => rectOf(l.box, raster));
 
-    // 1. Error level analysis across qualities (JPEG ghosts).
-    const curves = await ghostCurves(raster, rects);
-    const [nameCurve, ...peerCurves] = curves;
-    const usable = peerCurves.filter((c) => c.informative);
-    if (nameCurve.informative && usable.length >= 3) {
+    // 1. Error level analysis across qualities (JPEG ghosts), each field vs. the other text.
+    const curves = await ghostCurves(raster, [...targetRects, ...peerRects]);
+    const usable = curves.slice(located.length).filter((c) => c.informative);
+    // Lossless files carry no compression history of their own, so differences
+    // there come from content; demand a larger outlier before flagging.
+    const lossless = !/jpe?g/i.test(mimeType);
+    const [strongAt, moderateAt] = lossless ? [3.5, 2.6] : [3, 2];
+    if (usable.length >= 3) {
       const reference = GHOST_QUALITIES.map((_, i) => median(usable.map((c) => c.shape[i])));
       const distance = (c) => c.shape.reduce((s, v, i) => s + Math.abs(v - reference[i]), 0) / GHOST_QUALITIES.length;
-      const peerDistances = usable.map(distance);
-      const nameDistance = distance(nameCurve);
-      const peerMax = Math.max(0.01, ...peerDistances);
-      metrics.ela = { nameDistance: fmt(nameDistance, 3), peerMax: fmt(peerMax, 3), ratio: fmt(nameDistance / peerMax) };
-      // Lossless files carry no compression history of their own, so differences
-      // there come from content; demand a larger outlier before flagging.
-      const lossless = !/jpe?g/i.test(mimeType);
-      const [strongAt, moderateAt] = lossless ? [3.5, 2.6] : [3, 2];
-      if (nameDistance > 0.045 && nameDistance / peerMax > strongAt) {
-        signals.push(signal('ela', 'strong', 'Compression history differs on the name', `Error level analysis shows the name was saved a different number of times, or at a different quality, than the rest of the certificate (${(nameDistance / peerMax).toFixed(1)}× outside the normal range).`, nameDistance));
-      } else if (nameDistance > 0.025 && nameDistance / peerMax > moderateAt) {
-        signals.push(signal('ela', 'moderate', 'Unusual compression around the name', `The name's error level sits ${(nameDistance / peerMax).toFixed(1)}× outside the range of the other text.`, nameDistance));
-      }
+      const peerMax = Math.max(0.01, ...usable.map(distance));
+      located.forEach((t, k) => {
+        const curve = curves[k];
+        if (!curve.informative) return;
+        const d = distance(curve);
+        const ratio = d / peerMax;
+        const fm = (metrics.fields[t.field] ||= {});
+        fm.ela = { distance: fmt(d, 3), peerMax: fmt(peerMax, 3), ratio: fmt(ratio) };
+        if (t.field === 'name') metrics.ela = { nameDistance: fmt(d, 3), peerMax: fmt(peerMax, 3), ratio: fmt(ratio) };
+        const label = FIELD_LABELS[t.field];
+        if (d > 0.045 && ratio > strongAt) {
+          signals.push(signal('ela', 'strong', `Compression history differs on the ${FIELD_NAMES[t.field]}`, `Error level analysis shows the ${label} was saved a different number of times, or at a different quality, than the rest of the certificate (${ratio.toFixed(1)}× outside the normal range).`, d, t.field));
+        } else if (d > 0.025 && ratio > moderateAt) {
+          signals.push(signal('ela', 'moderate', `Unusual compression around the ${FIELD_NAMES[t.field]}`, `The ${label}'s error level sits ${ratio.toFixed(1)}× outside the range of the other text.`, d, t.field));
+        }
+      });
     }
 
     // 2. Sensor noise: only meaningful when the page itself is noisy (a photo).
-    const nameNoise = flatNoise(raster, rectOf(nameLine.box, raster, 0.6, 0.04));
-    const peerNoise = peers.map((l) => flatNoise(raster, rectOf(l.box, raster, 0.6, 0.04))).filter((v) => v !== null);
+    // Measured close to the text: a pasted patch is only as big as the line.
+    const peerNoise = peers.map((l) => flatNoise(raster, rectOf(l.box, raster, 0.25, 0.02))).filter((v) => v !== null);
     const noiseMed = median(peerNoise);
-    metrics.noise = { name: nameNoise === null ? null : fmt(nameNoise), peers: fmt(noiseMed) };
-    if (nameNoise !== null && peerNoise.length >= 3 && noiseMed >= 1.2) {
-      const nr = nameNoise / noiseMed;
-      if (nr < 0.3) signals.push(signal('noise', 'strong', 'Name is missing camera noise', 'The background behind the name is perfectly clean while the rest of the photo has sensor noise — typical of pasted text.', nr));
-      else if (nr < 0.5) signals.push(signal('noise', 'moderate', 'Lower noise behind the name', 'The area behind the name is smoother than the rest of the photo.', nr));
+    for (const t of located) {
+      const n = flatNoise(raster, rectOf(t.line.box, raster, 0.25, 0.02));
+      (metrics.fields[t.field] ||= {}).noise = n === null ? null : fmt(n);
+      if (t.field === 'name') metrics.noise = { name: n === null ? null : fmt(n), peers: fmt(noiseMed) };
+      if (n === null || peerNoise.length < 3 || noiseMed < 1.2) continue;
+      const nr = n / noiseMed;
+      const label = FIELD_LABELS[t.field];
+      if (nr < 0.3) signals.push(signal('noise', 'strong', `The ${FIELD_NAMES[t.field]} is missing camera noise`, `The background behind the ${label} is perfectly clean while the rest of the photo has sensor noise — typical of pasted text.`, nr, t.field));
+      else if (nr < 0.5) signals.push(signal('noise', 'moderate', `Lower noise behind the ${FIELD_NAMES[t.field]}`, `The area behind the ${label} is smoother than the rest of the photo.`, nr, t.field));
     }
+    metrics.noisePeers = fmt(noiseMed);
 
-    // 3. Background patch hugging the name, absent behind the other lines.
-    const namePatch = patchAround(raster, rectOf(nameLine.box, raster, 0, 0));
+    // 3. Background patch hugging a field but no ordinary line (cover-up rectangle).
     const peerPatches = peers.filter((l) => patchAround(raster, rectOf(l.box, raster, 0, 0))).length;
-    metrics.patch = namePatch ? { contrast: fmt(namePatch.contrast, 1), tight: fmt(namePatch.tight), peersWithPanels: peerPatches } : null;
-    if (namePatch && namePatch.contrast <= 24 && peerPatches <= 1) {
-      signals.push(
-        signal(
-          'patch',
-          namePatch.contrast <= 10 ? 'moderate' : 'weak',
-          'Name sits on a pasted background',
-          `A faint rectangle (${namePatch.contrast.toFixed(0)} grey levels from the paper) surrounds the name but no other text — typical of a cover-up patch.`,
-          namePatch.contrast
-        )
-      );
-    }
+    located.forEach((t, k) => {
+      const patch = patchAround(raster, { ...targetRects[k], ...rectOf(t.line.box, raster, 0, 0) });
+      (metrics.fields[t.field] ||= {}).patch = patch ? { contrast: fmt(patch.contrast, 1), tight: fmt(patch.tight), peersWithPanels: peerPatches } : null;
+      if (t.field === 'name') metrics.patch = metrics.fields.name.patch;
+      if (patch && patch.contrast <= 24 && peerPatches <= 1) {
+        signals.push(
+          signal(
+            'patch',
+            patch.contrast <= 10 ? 'moderate' : 'weak',
+            `The ${FIELD_NAMES[t.field]} sits on a pasted background`,
+            `A faint rectangle (${patch.contrast.toFixed(0)} grey levels from the paper) surrounds the ${FIELD_LABELS[t.field]} but no other text — typical of a cover-up patch.`,
+            patch.contrast,
+            t.field
+          )
+        );
+      }
+    });
   } else {
     metrics.note = 'Not enough comparable text lines for region analysis.';
   }
 
-  // 4. Alignment: centred documents keep every line on one axis.
+  if (nameTarget) analyzeNameLayout(nameTarget.line, peers, signals, metrics);
+  metrics.nameLocatedBy = nameTarget?.line.locatedBy || null;
+  return { applicable: true, fieldsChecked: located.map((t) => t.field), regionAnalysis: peers.length >= 3, signals, metrics };
+}
+
+// Layout checks that only make sense for the name.
+function analyzeNameLayout(nameLine, peers, signals, metrics) {
+  // Alignment: centred documents keep every line on one axis.
   const wide = peers.filter((l) => l.box.w > 0.12);
   const centres = wide.map((l) => l.box.x + l.box.w / 2);
   const axis = median(centres);
   const onAxis = centres.filter((c) => Math.abs(c - axis) < 0.02).length;
-  if (wide.length >= 3 && onAxis / wide.length >= 0.6) {
+  if (wide.length >= 3 && onAxis / wide.length >= 0.6 && nameLine.locatedBy !== 'gap') {
     const offset = Math.abs(nameLine.box.x + nameLine.box.w / 2 - axis);
     metrics.centreOffset = fmt(offset, 3);
-    if (offset > 0.06) signals.push(signal('alignment', 'moderate', 'Name is off the centre line', `Every other line is centred, but the name sits ${(offset * 100).toFixed(1)}% off the axis.`, offset));
-    else if (offset > 0.035) signals.push(signal('alignment', 'weak', 'Name slightly off-centre', `The name is ${(offset * 100).toFixed(1)}% off the document’s centre line.`, offset));
+    if (offset > 0.06) signals.push(signal('alignment', 'moderate', 'Name is off the centre line', `Every other line is centred, but the name sits ${(offset * 100).toFixed(1)}% off the axis.`, offset, 'name'));
+    else if (offset > 0.035) signals.push(signal('alignment', 'weak', 'Name slightly off-centre', `The name is ${(offset * 100).toFixed(1)}% off the document’s centre line.`, offset, 'name'));
   }
 
-  // 5. Skew: in a photo every line shares the same perspective.
+  // Skew: in a photo every line shares the same perspective.
   const angles = peers.map((l) => l.angle || 0);
-  if (angles.length >= 3) {
+  if (angles.length >= 3 && nameLine.locatedBy !== 'gap') {
     const med = median(angles);
     const dev = Math.abs((nameLine.angle || 0) - med);
     metrics.skewDeviation = fmt(dev);
     if (dev > 2 && mad(angles) < 0.8) {
-      signals.push(signal('skew', dev > 4 ? 'strong' : 'moderate', 'Name is tilted differently', `The name is rotated ${dev.toFixed(1)}° relative to the rest of the text.`, dev));
+      signals.push(signal('skew', dev > 4 ? 'strong' : 'moderate', 'Name is tilted differently', `The name is rotated ${dev.toFixed(1)}° relative to the rest of the text.`, dev, 'name'));
     }
   }
 
-  // 6. Font metrics inside a sentence ("… certifies that Jane Doe has …").
+  // Font metrics inside a sentence ("… certifies that Jane Doe has …").
   const nameWords = new Set((nameLine.nameTokens || []).map((t) => t.toLowerCase()));
   const words = nameLine.words || [];
   const inName = words.filter((w) => nameWords.has(w.text.toLowerCase().replace(/[^a-z]/g, '')));
@@ -369,12 +410,9 @@ async function analyzeRaster({ buffer, mimeType, layout, nameLine, metadataText 
     metrics.inlineSizeRatio = fmt(sizeRatio);
     metrics.inlineBaselineShift = fmt(baselineShift);
     if (sizeRatio > 1.3 || sizeRatio < 0.75 || baselineShift > 0.3) {
-      signals.push(signal('fontMetrics', baselineShift > 0.5 ? 'strong' : 'moderate', 'Font mismatch inside the sentence', `The name's letter height (${Math.round(sizeRatio * 100)}%) or baseline doesn't match the words around it.`, sizeRatio));
+      signals.push(signal('fontMetrics', baselineShift > 0.5 ? 'strong' : 'moderate', 'Font mismatch inside the sentence', `The name's letter height (${Math.round(sizeRatio * 100)}%) or baseline doesn't match the words around it.`, sizeRatio, 'name'));
     }
   }
-
-  metrics.nameLocatedBy = nameLine.locatedBy || 'text';
-  return { applicable: true, signals, metrics };
 }
 
 // ---------------------------------------------------------------------------
@@ -409,12 +447,16 @@ function analyzePdf(buffer) {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
-export async function analyzeTampering({ buffer, mimeType, layout, nameLine, metadataText = '' }) {
+// targets: [{ field: 'name' | 'date' | 'title', line }] — or pass nameLine alone.
+export async function analyzeTampering({ buffer, mimeType, layout, nameLine, targets, metadataText = '' }) {
+  const fieldTargets = targets || [{ field: 'name', line: nameLine }];
   let result;
   try {
-    result = mimeType.includes('pdf') ? analyzePdf(buffer) : await analyzeRaster({ buffer, mimeType, layout, nameLine, metadataText });
+    result = mimeType.includes('pdf')
+      ? analyzePdf(buffer)
+      : await analyzeRaster({ buffer, mimeType, layout, targets: fieldTargets, metadataText });
   } catch (err) {
-    result = { applicable: false, reason: `Forensic analysis failed: ${err.message}`, signals: [], metrics: {} };
+    result = { applicable: false, fieldsChecked: [], reason: `Forensic analysis failed: ${err.message}`, signals: [], metrics: {} };
   }
   const strong = result.signals.filter((s) => s.severity === 'strong').length;
   const moderate = result.signals.filter((s) => s.severity === 'moderate').length;

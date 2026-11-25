@@ -86,7 +86,7 @@ class _PendingVerificationScreenState extends State<PendingVerificationScreen> {
     return RefreshIndicator(
       onRefresh: widget.onRefresh,
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 24, 16, 32),
+        padding: pagePadding(context, horizontal: 16, top: 24),
         children: [
           Card(
             child: Padding(
